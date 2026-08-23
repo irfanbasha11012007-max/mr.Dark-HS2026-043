@@ -384,24 +384,17 @@ class VectorStore:
         return results
 
     def save(self, directory: Union[str, Path]) -> None:
-        """Persist vector store index, chunks, and embeddings to disk.
-
-        Args:
-            directory: Target directory to save artifacts.
-        """
+        """Persist vector store index, chunks, and embeddings to disk."""
         dir_path = Path(directory).resolve()
         dir_path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save embeddings array
         if self.embeddings is not None:
             np.savez_compressed(dir_path / "embeddings.npz", embeddings=self.embeddings)
 
-        # 2. Save document chunks
         chunks_data = [chunk.to_dict() for chunk in self.chunks]
         with open(dir_path / "chunks.json", "w", encoding="utf-8") as f:
             json.dump(chunks_data, f, ensure_ascii=False, indent=2)
 
-        # 3. Save index configuration metadata
         config_data = {
             "total_chunks": self.total_chunks,
             "dimension": self.dimension,
@@ -413,8 +406,81 @@ class VectorStore:
         with open(dir_path / "config.json", "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
 
-        # 4. Save embedding model state if supported
         if hasattr(self.embedding_model, "save"):
             self.embedding_model.save(dir_path / "model.pkl")
 
         logger.info("Successfully persisted VectorStore to %s", dir_path)
+
+    @classmethod
+    def load(
+        cls,
+        directory: Union[str, Path],
+        embedding_model: Optional[BaseEmbeddingModel] = None,
+    ) -> "VectorStore":
+        """Load a persisted VectorStore from disk.
+
+        Args:
+            directory: Directory containing saved index files.
+            embedding_model: Optional embedding model override.
+
+        Returns:
+            Reconstituted VectorStore instance.
+        """
+        dir_path = Path(directory).resolve()
+        if not dir_path.exists() or not dir_path.is_dir():
+            raise FileNotFoundError(f"VectorStore directory not found: {directory}")
+
+        chunks_file = dir_path / "chunks.json"
+        config_file = dir_path / "config.json"
+        embeddings_file = dir_path / "embeddings.npz"
+        model_file = dir_path / "model.pkl"
+
+        if not chunks_file.exists() or not config_file.exists():
+            raise FileNotFoundError(f"Missing required index files in {directory}")
+
+        with open(config_file, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+
+        normalize_embeddings = config_data.get("normalize_embeddings", True)
+
+        # Load or reconstruct embedding model
+        model = embedding_model
+        if model is None:
+            if model_file.exists():
+                try:
+                    model = TfidfEmbeddingModel.load(model_file)
+                except Exception as e:
+                    logger.warning("Could not load model.pkl (%s), using default model", e)
+            if model is None:
+                model_class = config_data.get("model_class", "TfidfEmbeddingModel")
+                if "Dense" in model_class:
+                    model = get_default_embedding_model("dense", dimension=config_data.get("dimension", 384))
+                else:
+                    model = get_default_embedding_model("tfidf", max_features=config_data.get("dimension", 512))
+
+        store = cls(
+            embedding_model=model,
+            normalize_embeddings=normalize_embeddings,
+        )
+
+        # Load chunks
+        with open(chunks_file, "r", encoding="utf-8") as f:
+            chunks_raw = json.load(f)
+
+        loaded_chunks = [DocumentChunk.from_dict(c) for c in chunks_raw]
+        for idx, chunk in enumerate(loaded_chunks):
+            store.chunks.append(chunk)
+            store._chunk_id_to_idx[chunk.chunk_id] = idx
+
+        # Load embeddings matrix
+        if embeddings_file.exists():
+            data = np.load(embeddings_file)
+            store.embeddings = data["embeddings"].astype(np.float32)
+
+        logger.info(
+            "Loaded VectorStore from %s (%d chunks, dim=%d)",
+            dir_path,
+            store.total_chunks,
+            store.dimension,
+        )
+        return store
