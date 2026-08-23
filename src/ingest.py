@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from pypdf import PdfReader
+
 from src.config import IngestionConfig, default_config
 
 logger = logging.getLogger(__name__)
@@ -211,15 +213,7 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
 
 
 def load_markdown_document(file_path: Union[str, Path], strip_frontmatter: bool = False) -> Document:
-    """Load a markdown document with frontmatter parsing and header extraction.
-
-    Args:
-        file_path: Path to the markdown file (.md, .markdown).
-        strip_frontmatter: If True, frontmatter block is removed from content and stored in metadata.
-
-    Returns:
-        Document instance with markdown-specific metadata.
-    """
+    """Load a markdown document with frontmatter parsing and header extraction."""
     raw_doc = load_text_document(file_path)
     frontmatter, body = parse_frontmatter(raw_doc.content)
 
@@ -252,3 +246,139 @@ def load_markdown_document(file_path: Union[str, Path], strip_frontmatter: bool 
         doc_type="markdown",
         metadata=metadata,
     )
+
+
+def load_pdf_document(file_path: Union[str, Path]) -> Document:
+    """Load a PDF document page by page using pypdf.
+
+    Args:
+        file_path: Path to the PDF file.
+
+    Returns:
+        Document instance with per-page text, page offsets, and PDF metadata.
+
+    Raises:
+        FileNotFoundError: If the PDF does not exist.
+        ValueError: If file is not a valid or readable PDF.
+    """
+    path = Path(file_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
+    if not path.is_file():
+        raise ValueError(f"Path is not a regular file: {file_path}")
+
+    try:
+        reader = PdfReader(str(path))
+    except Exception as e:
+        raise ValueError(f"Could not open or parse PDF '{file_path}': {e}") from e
+
+    num_pages = len(reader.pages)
+    page_texts: List[str] = []
+    page_spans: List[Dict[str, Any]] = []
+    current_char_offset = 0
+
+    for page_idx, page in enumerate(reader.pages):
+        try:
+            page_text = page.extract_text() or ""
+        except Exception as e:
+            logger.warning("Error extracting text from page %d of %s: %s", page_idx + 1, path.name, e)
+            page_text = ""
+
+        page_texts.append(page_text)
+        page_len = len(page_text)
+        page_spans.append({
+            "page_number": page_idx + 1,
+            "start_char": current_char_offset,
+            "end_char": current_char_offset + page_len,
+            "char_count": page_len,
+        })
+        # Account for page separator newline
+        current_char_offset += page_len + 1
+
+    full_content = "\n".join(page_texts)
+    file_stat = path.stat()
+    doc_id = generate_doc_id(path, full_content)
+
+    # Extract standard PDF metadata if present
+    pdf_info: Dict[str, Any] = {}
+    if reader.metadata:
+        for k, v in reader.metadata.items():
+            if v:
+                clean_key = k.lstrip("/").lower()
+                pdf_info[clean_key] = str(v)
+
+    metadata: Dict[str, Any] = {
+        "file_name": path.name,
+        "file_path": str(path.as_posix()),
+        "file_extension": ".pdf",
+        "file_size_bytes": file_stat.st_size,
+        "page_count": num_pages,
+        "pages": page_spans,
+        "pdf_info": pdf_info,
+        "title": pdf_info.get("title") or path.stem,
+        "author": pdf_info.get("author"),
+        "modified_time": datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+    return Document(
+        doc_id=doc_id,
+        content=full_content,
+        source=str(path.as_posix()),
+        doc_type="pdf",
+        metadata=metadata,
+    )
+
+
+def load_document(file_path: Union[str, Path], config: Optional[IngestionConfig] = None) -> Document:
+    """Dispatch and load a document based on its file extension."""
+    path = Path(file_path).resolve()
+    ext = path.suffix.lower()
+    cfg = config or default_config
+
+    if ext not in cfg.supported_extensions:
+        raise ValueError(
+            f"Unsupported file extension '{ext}' for {file_path}. Supported extensions: {cfg.supported_extensions}"
+        )
+
+    if ext in (".txt", ".text"):
+        return load_text_document(path)
+    elif ext in (".md", ".markdown"):
+        return load_markdown_document(path)
+    elif ext == ".pdf":
+        return load_pdf_document(path)
+    else:
+        # Fallback to plain text for generic supported extensions
+        return load_text_document(path)
+
+
+def load_directory(
+    dir_path: Union[str, Path],
+    recursive: bool = True,
+    config: Optional[IngestionConfig] = None,
+) -> List[Document]:
+    """Scan and load all supported documents from a directory.
+
+    Args:
+        dir_path: Path to directory.
+        recursive: Whether to scan subdirectories recursively.
+        config: Ingestion configuration.
+
+    Returns:
+        List of loaded Document objects.
+    """
+    path = Path(dir_path).resolve()
+    if not path.exists() or not path.is_dir():
+        raise FileNotFoundError(f"Directory not found: {dir_path}")
+
+    cfg = config or default_config
+    docs: List[Document] = []
+
+    pattern = "**/*" if recursive else "*"
+    for item in sorted(path.glob(pattern)):
+        if item.is_file() and item.suffix.lower() in cfg.supported_extensions:
+            try:
+                docs.append(load_document(item, config=cfg))
+            except Exception as e:
+                logger.error("Failed to load document '%s': %s", item, e)
+
+    return docs
