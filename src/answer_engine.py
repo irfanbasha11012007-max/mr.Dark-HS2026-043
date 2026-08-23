@@ -170,7 +170,7 @@ class AnswerResponse:
 
 
 class LLMClient:
-    """HTTP Client for OpenRouter / OpenAI chat completion endpoints."""
+    """HTTP Client for OpenRouter / OpenAI chat completion endpoints with retry backoff."""
 
     def __init__(
         self,
@@ -195,7 +195,7 @@ class LLMClient:
         model: Optional[str] = None,
         config_override: Optional[GenerationConfig] = None,
     ) -> Dict[str, Any]:
-        """Send chat completion request to the API with strict timeout enforcement."""
+        """Send chat completion request to the API with retries and exponential backoff."""
         if not self.is_available:
             raise ValueError("LLMClient is not configured with an API key")
 
@@ -221,26 +221,43 @@ class LLMClient:
         }
 
         data_bytes = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(endpoint, data=data_bytes, headers=headers, method="POST")
+        last_exception: Optional[Exception] = None
 
-        try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as response:
-                res_body = json.loads(response.read().decode("utf-8"))
-        except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
-            logger.error("LLM API request timed out after %.1fs: %s", cfg.timeout_seconds, e)
-            raise TimeoutError(f"LLM request timed out after {cfg.timeout_seconds}s") from e
+        for attempt in range(max(1, cfg.max_retries)):
+            req = urllib.request.Request(endpoint, data=data_bytes, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
 
-        choice = res_body.get("choices", [{}])[0]
-        content = choice.get("message", {}).get("content", "")
-        usage = res_body.get("usage", {})
-        tokens_used = usage.get("total_tokens", 0)
+                choice = res_body.get("choices", [{}])[0]
+                content = choice.get("message", {}).get("content", "")
+                usage = res_body.get("usage", {})
+                tokens_used = usage.get("total_tokens", 0)
 
-        return {
-            "content": content.strip(),
-            "tokens_used": tokens_used,
-            "model": target_model,
-            "raw": res_body,
-        }
+                return {
+                    "content": content.strip(),
+                    "tokens_used": tokens_used,
+                    "model": target_model,
+                    "raw": res_body,
+                }
+
+            except urllib.error.HTTPError as e:
+                # Non-retryable client errors (except 429 Too Many Requests)
+                if e.code in (400, 401, 403, 404):
+                    logger.error("Non-retryable HTTP error %d: %s", e.code, e.reason)
+                    raise
+                last_exception = e
+                logger.warning("Transient HTTP %d on attempt %d/%d: %s", e.code, attempt + 1, cfg.max_retries, e.reason)
+            except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
+                last_exception = e
+                logger.warning("Network/Timeout error on attempt %d/%d: %s", attempt + 1, cfg.max_retries, e)
+
+            # Exponential backoff sleep before next retry attempt
+            if attempt < cfg.max_retries - 1:
+                sleep_sec = (cfg.retry_backoff_factor ** attempt) * 0.5
+                time.sleep(sleep_sec)
+
+        raise RuntimeError(f"All {cfg.max_retries} LLM API attempts failed") from last_exception
 
 
 def evaluate_confidence_abstention(
@@ -343,7 +360,6 @@ def parse_and_bind_citations(
         except ValueError:
             continue
 
-    # If no explicit numbered brackets found, bind top-1 chunk if confidence is high
     if not citations and hits and hits[0].confidence_score > 0.3:
         top_chunk = hits[0].chunk
         citations.append(
