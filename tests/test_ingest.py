@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from pypdf import PdfWriter
 
 from src.config import IngestionConfig
 from src.ingest import (
@@ -12,7 +13,10 @@ from src.ingest import (
     DocumentChunk,
     clean_text,
     generate_doc_id,
+    load_directory,
+    load_document,
     load_markdown_document,
+    load_pdf_document,
     load_text_document,
     parse_frontmatter,
 )
@@ -131,12 +135,65 @@ GET /api/v1/health
         assert doc.metadata["frontmatter"]["title"] == "API Spec"
 
     def test_parse_frontmatter_edge_cases(self):
-        # Missing closing marker
         fm, body = parse_frontmatter("---\ntitle: Incomplete\nno closing marker")
         assert fm == {}
         assert "Incomplete" in body
 
-        # Plain text without frontmatter
         fm, body = parse_frontmatter("Just a regular string without frontmatter.")
         assert fm == {}
         assert body == "Just a regular string without frontmatter."
+
+
+class TestPdfDocumentLoader:
+    """Test suite for PDF document loading and metadata extraction."""
+
+    def test_load_pdf_multi_page(self, tmp_path: Path):
+        pdf_path = tmp_path / "sample_doc.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=300, height=300)
+        writer.add_blank_page(width=300, height=300)
+        with open(pdf_path, "wb") as f:
+            writer.write(f)
+        writer.close()
+
+        doc = load_pdf_document(pdf_path)
+        assert doc.doc_type == "pdf"
+        assert doc.metadata["page_count"] == 2
+        assert len(doc.metadata["pages"]) == 2
+        assert doc.metadata["pages"][0]["page_number"] == 1
+        assert doc.metadata["pages"][1]["page_number"] == 2
+
+    def test_load_pdf_not_found(self, tmp_path: Path):
+        non_existent = tmp_path / "missing.pdf"
+        with pytest.raises(FileNotFoundError):
+            load_pdf_document(non_existent)
+
+    def test_load_document_dispatcher(self, tmp_path: Path):
+        t_file = tmp_path / "test.txt"
+        t_file.write_text("Plain text content", encoding="utf-8")
+        m_file = tmp_path / "test.md"
+        m_file.write_text("# Markdown Title\nContent", encoding="utf-8")
+
+        doc_t = load_document(t_file)
+        assert doc_t.doc_type == "text"
+
+        doc_m = load_document(m_file)
+        assert doc_m.doc_type == "markdown"
+
+        bad_file = tmp_path / "test.exe"
+        bad_file.write_bytes(b"bad binary")
+        with pytest.raises(ValueError, match="Unsupported file extension"):
+            load_document(bad_file)
+
+    def test_load_directory_mixed_files(self, tmp_path: Path):
+        (tmp_path / "doc1.txt").write_text("First file", encoding="utf-8")
+        (tmp_path / "doc2.md").write_text("# Second file", encoding="utf-8")
+        sub = tmp_path / "nested"
+        sub.mkdir()
+        (sub / "doc3.txt").write_text("Nested third file", encoding="utf-8")
+
+        docs = load_directory(tmp_path, recursive=True)
+        assert len(docs) == 3
+        types = {d.doc_type for d in docs}
+        assert "text" in types
+        assert "markdown" in types
