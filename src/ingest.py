@@ -6,11 +6,14 @@ recursive text chunkers with overlap and metadata tracking, and a command-line i
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
 import os
 import re
+import sys
+import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -604,10 +607,7 @@ def compute_character_offsets(
     chunks: Sequence[str],
     original_text: str,
 ) -> List[Tuple[int, int]]:
-    """Accurately compute (start_char, end_char) offsets for each chunk in the source text.
-
-    Uses cursor progression and fallback matching to guarantee monotonic, accurate boundary spans.
-    """
+    """Accurately compute (start_char, end_char) offsets for each chunk in the source text."""
     offsets: List[Tuple[int, int]] = []
     cursor = 0
     doc_len = len(original_text)
@@ -618,26 +618,20 @@ def compute_character_offsets(
             offsets.append((cursor, cursor))
             continue
 
-        # Strategy 1: Look for exact chunk match starting from current cursor
         found_idx = original_text.find(clean_target, cursor)
 
-        # Strategy 2: Look for match anywhere from cursor onwards (or wrap around if needed)
         if found_idx == -1:
-            # Check from beginning if cursor advanced past an overlap
             found_idx = original_text.find(clean_target)
 
-        # Strategy 3: Substring prefix match (first 25-40 chars of chunk)
         if found_idx == -1:
             prefix_sample = clean_target[:min(35, len(clean_target))]
             found_idx = original_text.find(prefix_sample, cursor)
             if found_idx == -1:
                 found_idx = original_text.find(prefix_sample)
 
-        # Fallback: Sequential slice from cursor
         if found_idx != -1:
             start_pos = found_idx
             end_pos = min(start_pos + len(clean_target), doc_len)
-            # Advance cursor moderately to allow overlapping subsequent chunks
             cursor = max(cursor, start_pos + 1)
         else:
             start_pos = min(cursor, doc_len)
@@ -653,23 +647,17 @@ def chunk_document(
     doc: Document,
     config: Optional[IngestionConfig] = None,
 ) -> List[DocumentChunk]:
-    """Process and chunk a Document into a list of enriched DocumentChunk objects.
-
-    Calculates exact start_char / end_char spans, maps section headers, page numbers,
-    and attaches comprehensive chunk metadata.
-    """
+    """Process and chunk a Document into a list of enriched DocumentChunk objects."""
     cfg = config or default_config
     text_to_process = doc.content
 
     if cfg.clean_whitespace:
-        # Note: clean text while keeping structure intact
         text_to_process = clean_text(
             text_to_process,
             clean_whitespace=cfg.clean_whitespace,
             normalize_unicode=cfg.normalize_unicode,
         )
 
-    # Detect section headings in document text
     section_spans = extract_section_spans(text_to_process) if cfg.extract_headers else []
 
     chunker = RecursiveCharacterChunker(
@@ -691,7 +679,6 @@ def chunk_document(
         chunk_id = f"{doc.doc_id}#chunk_{idx:04d}"
         active_header, hierarchy = find_active_section(start_char, section_spans)
 
-        # Build comprehensive metadata
         chunk_meta: Dict[str, Any] = {
             **doc.metadata,
             "chunk_index": idx,
@@ -704,7 +691,6 @@ def chunk_document(
             "word_count": len(chunk_text.split()),
         }
 
-        # If PDF, add page number mapping
         if doc.doc_type == "pdf" and "pages" in doc.metadata:
             chunk_meta["page_number"] = map_offset_to_page(start_char, doc.metadata["pages"])
 
@@ -722,3 +708,197 @@ def chunk_document(
         chunks.append(chunk)
 
     return chunks
+
+
+class IngestionPipeline:
+    """Orchestrates document loading, text cleaning, chunking, and JSONL export."""
+
+    def __init__(self, config: Optional[IngestionConfig] = None) -> None:
+        self.config = config or default_config
+
+    def process_document(self, doc: Document) -> List[DocumentChunk]:
+        """Process a single document."""
+        return chunk_document(doc, self.config)
+
+    def run(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        recursive: bool = True,
+    ) -> Dict[str, Any]:
+        """Run the ingestion pipeline on a file or directory and write JSONL output.
+
+        Args:
+            input_path: Path to file or directory.
+            output_path: Destination JSONL file path (optional).
+            recursive: Whether to scan directory recursively.
+
+        Returns:
+            Dictionary containing pipeline execution metrics and summary.
+        """
+        start_time = time.time()
+        in_p = Path(input_path).resolve()
+        out_p = Path(output_path or self.config.output_file).resolve()
+
+        if not in_p.exists():
+            raise FileNotFoundError(f"Input path not found: {input_path}")
+
+        # Load documents
+        docs: List[Document] = []
+        if in_p.is_file():
+            docs.append(load_document(in_p, config=self.config))
+        else:
+            docs = load_directory(in_p, recursive=recursive, config=self.config)
+
+        # Chunk all loaded documents
+        all_chunks: List[DocumentChunk] = []
+        for doc in docs:
+            doc_chunks = self.process_document(doc)
+            all_chunks.extend(doc_chunks)
+
+        # Ensure destination folder exists
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        # Export chunks to JSONL
+        with open(out_p, "w", encoding="utf-8") as f:
+            for chunk in all_chunks:
+                f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+
+        elapsed = time.time() - start_time
+        total_chars = sum(c.char_count for c in all_chunks)
+        total_words = sum(c.word_count for c in all_chunks)
+        avg_chunk_size = total_chars / len(all_chunks) if all_chunks else 0
+
+        summary = {
+            "total_documents": len(docs),
+            "total_chunks": len(all_chunks),
+            "total_characters": total_chars,
+            "total_words": total_words,
+            "avg_chunk_size": round(avg_chunk_size, 2),
+            "output_file": str(out_p.as_posix()),
+            "elapsed_seconds": round(elapsed, 4),
+        }
+
+        logger.info(
+            "Ingestion completed: %d documents -> %d chunks in %.2fs. Saved to: %s",
+            len(docs),
+            len(all_chunks),
+            elapsed,
+            out_p,
+        )
+        return summary
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Knowledge Assistant - Document Ingestion CLI",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--input",
+        "-i",
+        dest="input_path",
+        default="data/raw",
+        help="Path to input document file or directory",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        dest="output_path",
+        default="data/processed/chunks.jsonl",
+        help="Path to output JSONL file",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        "-c",
+        type=int,
+        default=500,
+        help="Maximum characters per chunk",
+    )
+    parser.add_argument(
+        "--chunk-overlap",
+        "-v",
+        type=int,
+        default=50,
+        help="Character overlap between consecutive chunks",
+    )
+    parser.add_argument(
+        "--min-chunk-length",
+        type=int,
+        default=20,
+        help="Minimum character threshold for a valid chunk",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        default=True,
+        help="Recursively scan subdirectories",
+    )
+    parser.add_argument(
+        "--no-recursive",
+        action="store_false",
+        dest="recursive",
+        help="Do not scan subdirectories",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print summary statistics table",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging level",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Main CLI entrypoint for document ingestion."""
+    parser = build_cli_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    config = IngestionConfig.from_env(
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
+        min_chunk_length=args.min_chunk_length,
+        output_file=args.output_path,
+    )
+
+    pipeline = IngestionPipeline(config=config)
+
+    try:
+        summary = pipeline.run(
+            input_path=args.input_path,
+            output_path=args.output_path,
+            recursive=args.recursive,
+        )
+
+        print("\n" + "=" * 55)
+        print("  DOCUMENT INGESTION COMPLETED")
+        print("=" * 55)
+        print(f"  Total Documents Ingested : {summary['total_documents']}")
+        print(f"  Total Chunks Generated   : {summary['total_chunks']}")
+        print(f"  Total Characters         : {summary['total_characters']}")
+        print(f"  Total Words              : {summary['total_words']}")
+        print(f"  Average Chunk Size       : {summary['avg_chunk_size']} chars")
+        print(f"  Output JSONL Path        : {summary['output_file']}")
+        print(f"  Elapsed Processing Time  : {summary['elapsed_seconds']} s")
+        print("=" * 55 + "\n")
+        return 0
+
+    except Exception as e:
+        logger.error("Ingestion failed: %s", e, exc_info=True)
+        print(f"\n[ERROR] Ingestion failed: {e}\n", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
