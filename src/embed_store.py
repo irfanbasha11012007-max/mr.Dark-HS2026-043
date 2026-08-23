@@ -179,7 +179,6 @@ class LocalDenseEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimension: int = 384, model_name: str = "local-dense-384") -> None:
         self._dim = dimension
         self._name = model_name
-        # Seed random projection matrices deterministically
         rng = np.random.RandomState(42)
         self._projection_matrix = rng.randn(1024, self._dim).astype(np.float32)
 
@@ -195,7 +194,6 @@ class LocalDenseEmbeddingModel(BaseEmbeddingModel):
         """Project a single token deterministically into hash space."""
         h = int(hashlib.sha256(token.encode("utf-8")).hexdigest(), 16)
         vec = np.zeros(1024, dtype=np.float32)
-        # Set top-k hashed active coordinates
         for i in range(8):
             idx = (h >> (i * 8)) % 1024
             sign = 1.0 if ((h >> (i * 8 + 4)) & 1) else -1.0
@@ -211,12 +209,10 @@ class LocalDenseEmbeddingModel(BaseEmbeddingModel):
         if not tokens:
             return np.zeros(self._dim, dtype=np.float32)
 
-        # Aggregate token hash projections with position decay
         accumulated = np.zeros(1024, dtype=np.float32)
         for idx, token in enumerate(tokens):
             weight = 1.0 / (1.0 + 0.05 * idx)
             accumulated += weight * self._hash_token(token)
-            # Add character n-grams for subword sensitivity
             if len(token) >= 3:
                 for j in range(len(token) - 2):
                     ngram = token[j:j + 3]
@@ -251,3 +247,85 @@ def get_default_embedding_model(model_type: str = "tfidf", **kwargs) -> BaseEmbe
     else:
         logger.warning("Unrecognized model_type '%s', defaulting to TF-IDF", model_type)
         return TfidfEmbeddingModel(**kwargs)
+
+
+class VectorStore:
+    """In-memory and disk-persistent vector storage for document chunks and embeddings."""
+
+    def __init__(
+        self,
+        embedding_model: Optional[BaseEmbeddingModel] = None,
+        normalize_embeddings: bool = True,
+    ) -> None:
+        self.embedding_model = embedding_model or get_default_embedding_model("tfidf")
+        self.normalize_embeddings = normalize_embeddings
+        self.chunks: List[DocumentChunk] = []
+        self.embeddings: Optional[np.ndarray] = None
+        self._chunk_id_to_idx: Dict[str, int] = {}
+
+    @property
+    def total_chunks(self) -> int:
+        """Return the number of stored document chunks."""
+        return len(self.chunks)
+
+    @property
+    def dimension(self) -> int:
+        """Return the dimensionality of stored embeddings."""
+        if self.embeddings is not None and len(self.embeddings) > 0:
+            return self.embeddings.shape[1]
+        return self.embedding_model.dimension
+
+    def get_chunk(self, index: int) -> DocumentChunk:
+        """Retrieve chunk by numeric index."""
+        if index < 0 or index >= len(self.chunks):
+            raise IndexError(f"Chunk index {index} out of bounds (total chunks: {len(self.chunks)})")
+        return self.chunks[index]
+
+    def get_chunk_by_id(self, chunk_id: str) -> Optional[DocumentChunk]:
+        """Retrieve chunk by unique chunk_id string."""
+        idx = self._chunk_id_to_idx.get(chunk_id)
+        if idx is not None:
+            return self.chunks[idx]
+        return None
+
+    def add_chunks(
+        self,
+        chunks: Sequence[DocumentChunk],
+        embeddings: Optional[np.ndarray] = None,
+    ) -> None:
+        """Add chunks and index their embeddings into the store.
+
+        Args:
+            chunks: Sequence of DocumentChunk objects.
+            embeddings: Optional pre-computed 2D float32 numpy array.
+        """
+        if not chunks:
+            return
+
+        chunk_list = list(chunks)
+        if embeddings is None:
+            texts = [c.text for c in chunk_list]
+            new_embeddings = self.embedding_model.embed_documents(texts)
+        else:
+            new_embeddings = np.asarray(embeddings, dtype=np.float32)
+            if len(new_embeddings) != len(chunk_list):
+                raise ValueError(
+                    f"Embeddings count ({len(new_embeddings)}) must match chunks count ({len(chunk_list)})"
+                )
+
+        start_idx = len(self.chunks)
+        for i, chunk in enumerate(chunk_list):
+            self.chunks.append(chunk)
+            self._chunk_id_to_idx[chunk.chunk_id] = start_idx + i
+
+        if self.embeddings is None:
+            self.embeddings = new_embeddings
+        else:
+            self.embeddings = np.vstack([self.embeddings, new_embeddings])
+
+        logger.info(
+            "Added %d chunks to VectorStore (Total: %d, Dimension: %d)",
+            len(chunk_list),
+            self.total_chunks,
+            self.dimension,
+        )
