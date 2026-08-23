@@ -15,6 +15,8 @@ import logging
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -137,6 +139,73 @@ class AnswerResponse:
         )
 
 
+class LLMClient:
+    """HTTP Client for OpenRouter / OpenAI chat completion endpoints."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: str = "https://openrouter.ai/api/v1",
+        default_model: str = "openai/gpt-4o-mini",
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.base_url = base_url.rstrip("/")
+        self.default_model = default_model
+        self.timeout_seconds = timeout_seconds
+
+    @property
+    def is_available(self) -> bool:
+        """Return True if an API key is configured."""
+        return bool(self.api_key and self.api_key.strip())
+
+    def complete_chat(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Dict[str, Any]:
+        """Send chat completion request to the API."""
+        if not self.is_available:
+            raise ValueError("LLMClient is not configured with an API key")
+
+        target_model = model or self.default_model
+        endpoint = f"{self.base_url}/chat/completions"
+
+        payload = {
+            "model": target_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            "HTTP-Referer": "https://github.com/irfanbasha11012007-max/mr.Dark",
+            "X-Title": "Knowledge Assistant",
+        }
+
+        data_bytes = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(endpoint, data=data_bytes, headers=headers, method="POST")
+
+        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
+            res_body = json.loads(response.read().decode("utf-8"))
+
+        choice = res_body.get("choices", [{}])[0]
+        content = choice.get("message", {}).get("content", "")
+        usage = res_body.get("usage", {})
+        tokens_used = usage.get("total_tokens", 0)
+
+        return {
+            "content": content.strip(),
+            "tokens_used": tokens_used,
+            "model": target_model,
+            "raw": res_body,
+        }
+
+
 def build_user_prompt(question: str, context_block: str) -> str:
     """Construct the final grounded user prompt pairing retrieved context with the question."""
     return (
@@ -154,12 +223,14 @@ class AnswerEngine:
     def __init__(
         self,
         retriever: Optional[HybridRetriever] = None,
+        llm_client: Optional[LLMClient] = None,
         model_name: str = "openai/gpt-4o-mini",
         temperature: float = 0.0,
         max_tokens: int = 1024,
         min_confidence_threshold: float = 0.20,
     ) -> None:
         self.retriever = retriever
+        self.llm_client = llm_client or LLMClient(default_model=model_name)
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
