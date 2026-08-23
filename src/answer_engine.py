@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from src.retriever import HybridRetriever, RetrievalHit, RetrievalResult
+from src.retriever import HybridRetriever, RetrievalHit, RetrievalResult, tokenize_query
 
 logger = logging.getLogger(__name__)
 
@@ -229,11 +229,7 @@ def evaluate_confidence_abstention(
     retrieval_result: Optional[RetrievalResult],
     min_confidence: float,
 ) -> Tuple[bool, Optional[str]]:
-    """Determine whether to abstain from answering based on retrieval confidence.
-
-    Returns:
-        (should_abstain, reason)
-    """
+    """Determine whether to abstain from answering based on retrieval confidence."""
     if retrieval_result is None or not retrieval_result.hits:
         return True, "No relevant documents found in knowledge base"
 
@@ -250,6 +246,34 @@ def evaluate_confidence_abstention(
         )
 
     return False, None
+
+
+def verify_context_sufficiency(
+    question: str,
+    hits: Sequence[RetrievalHit],
+    min_overlap_ratio: float = 0.25,
+) -> Tuple[bool, Optional[str]]:
+    """Verify whether retrieved context documents contain sufficient information to address the query."""
+    if not hits:
+        return False, "No context hits available"
+
+    q_tokens = set(tokenize_query(question))
+    if not q_tokens:
+        return True, None
+
+    combined_text = " ".join(h.chunk.text.lower() for h in hits)
+    context_words = set(re.findall(r"\b\w+\b", combined_text))
+
+    overlap = q_tokens.intersection(context_words)
+    overlap_ratio = len(overlap) / len(q_tokens)
+
+    if overlap_ratio < min_overlap_ratio:
+        return (
+            False,
+            f"Context lacks sufficient topical overlap ({overlap_ratio:.2f} < {min_overlap_ratio:.2f})",
+        )
+
+    return True, None
 
 
 def build_user_prompt(question: str, context_block: str) -> str:
@@ -291,7 +315,7 @@ class AnswerEngine:
         question: str,
         retrieval_result: Optional[RetrievalResult] = None,
     ) -> AnswerResponse:
-        """Generate a grounded answer for a question with strict confidence gating."""
+        """Generate a grounded answer for a question with strict confidence & sufficiency gating."""
         start_time = time.perf_counter()
         clean_q = question.strip()
 
@@ -311,7 +335,7 @@ class AnswerEngine:
             r_result = self.retriever.retrieve(clean_q)
 
         # 1. Evaluate confidence-based abstention
-        should_abstain, reason = evaluate_confidence_abstention(r_result, self.min_confidence_threshold)
+        should_abstain, conf_reason = evaluate_confidence_abstention(r_result, self.min_confidence_threshold)
         top_conf = r_result.top_confidence if r_result else 0.0
 
         if should_abstain:
@@ -319,7 +343,20 @@ class AnswerEngine:
                 question=clean_q,
                 answer=STANDARD_ABSTENTION_MESSAGE,
                 abstained=True,
-                abstention_reason=reason,
+                abstention_reason=conf_reason,
+                retrieval_confidence=top_conf,
+                latency_ms=(time.perf_counter() - start_time) * 1000,
+                model_name=self.model_name,
+            )
+
+        # 2. Evaluate context sufficiency
+        is_sufficient, suff_reason = verify_context_sufficiency(clean_q, r_result.hits if r_result else [])
+        if not is_sufficient:
+            return AnswerResponse(
+                question=clean_q,
+                answer=STANDARD_ABSTENTION_MESSAGE,
+                abstained=True,
+                abstention_reason=suff_reason,
                 retrieval_confidence=top_conf,
                 latency_ms=(time.perf_counter() - start_time) * 1000,
                 model_name=self.model_name,
