@@ -337,6 +337,7 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     st.sidebar.header("Configuration")
     st.session_state.model = st.sidebar.text_input("LLM Model Name", value=st.session_state.model)
     st.session_state.threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, value=st.session_state.threshold, step=0.05)
+    st.sidebar.caption("💡 Higher values reject more out-of-scope queries.")
     st.session_state.offline = st.sidebar.checkbox("Force Offline Mode", value=st.session_state.offline)
 
     # Render main tabs
