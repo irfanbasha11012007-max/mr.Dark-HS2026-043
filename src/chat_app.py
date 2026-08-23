@@ -11,6 +11,7 @@ import os
 import sys
 from pathlib import Path
 
+import streamlit as st
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -121,12 +122,9 @@ def init_engine(args: argparse.Namespace) -> AnswerEngine:
         try:
             vstore = VectorStore.load(vs_path)
             retriever = HybridRetriever(vector_store=vstore)
-            console.print(f"[green]Loaded Vector Store with {len(vstore.chunks)} chunks from {vs_path}[/green]")
+            logger.info("Loaded Vector Store from %s", vs_path)
         except Exception as e:
-            console.print(f"[red]Error loading Vector Store ({e}). Running without retriever context.[/red]")
-    else:
-        console.print(f"[yellow]Vector Store not found at {vs_path}. Please build index first.[/yellow]")
-
+            logger.error("Error loading Vector Store: %s", e)
     return AnswerEngine(
         retriever=retriever,
         model_name=args.model,
@@ -171,10 +169,86 @@ def run_terminal_chat(args: argparse.Namespace) -> None:
             break
 
 
+def setup_streamlit_styling() -> None:
+    """Inject custom CSS styling for premium glassmorphism dark theme and typography."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Inter', sans-serif;
+        }
+
+        h1, h2, h3 {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+            background: linear-gradient(135deg, #a5f3fc 0%, #38bdf8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Glassmorphic main panel styling */
+        .stChatMessage {
+            background: rgba(255, 255, 255, 0.03) !important;
+            border: 1px solid rgba(255, 255, 255, 0.05) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1) !important;
+            backdrop-filter: blur(5px) !important;
+            -webkit-backdrop-filter: blur(5px) !important;
+            margin-bottom: 12px !important;
+            padding: 16px !important;
+            transition: transform 0.2s ease, border 0.2s ease;
+        }
+
+        .stChatMessage:hover {
+            transform: translateY(-2px);
+            border: 1px solid rgba(56, 189, 248, 0.2) !important;
+        }
+
+        /* Premium Alert/Card panels */
+        .grounded-card {
+            background-color: rgba(34, 197, 94, 0.1);
+            border-left: 5px solid #22c55e;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-size: 1rem;
+        }
+
+        .abstention-card {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-left: 5px solid #ef4444;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-size: 1rem;
+        }
+
+        /* Sidebar styling */
+        section[data-testid="stSidebar"] {
+            background-color: #0f172a !important;
+            border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def run_streamlit_app(args: argparse.Namespace) -> None:
     """Run interactive Streamlit web application."""
-    console.print(f"Running Streamlit UI (Model: {args.model})")
-    # Streamlit execution will be added in subsequent commits
+    st.set_page_config(
+        page_title="Knowledge Assistant",
+        page_icon="🤖",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    setup_streamlit_styling()
+
+    st.title("🤖 AI Knowledge Assistant")
+    st.caption("Phase 4 Grounded Generation & Verification System")
+    st.write("Welcome to the interactive RAG playground.")
 
 
 def main() -> None:
