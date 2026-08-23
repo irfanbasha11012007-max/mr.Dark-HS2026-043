@@ -1,0 +1,8 @@
+{
+  "total_chunks": 26,
+  "dimension": 512,
+  "normalize_embeddings": true,
+  "model_name": "tfidf-dim512",
+  "model_class": "TfidfEmbeddingModel",
+  "saved_at": "2026-08-23T12:18:22.130728+00:00"
+}
