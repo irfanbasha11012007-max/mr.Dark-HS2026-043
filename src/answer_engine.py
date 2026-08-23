@@ -408,6 +408,38 @@ def clean_sentence_for_offline_answer(sent: str) -> str:
     return sent.strip()
 
 
+def find_active_header_in_chunk(chunk_text: str, sent: str, fallback_header: Optional[str]) -> Optional[str]:
+    """Find the most specific active section header for a sentence within a chunk's text."""
+    sent_idx = chunk_text.find(sent)
+    if sent_idx == -1:
+        return fallback_header
+
+    headers = []
+    
+    # Match markdown headers anywhere in text (preceded by start of string, space, or newline)
+    md_header_regex = re.compile(r"(?:^|[\r\n\s])(#{1,6})\s+([^\r\n]+)")
+    for match in md_header_regex.finditer(chunk_text):
+        # The title group is at group(2)
+        headers.append((match.start(), match.group(2).strip()))
+        
+    # Match numeric headers anywhere in text
+    num_header_regex = re.compile(r"(?:^|[\r\n\s])(?:Section\s+)?(\d+(?:\.\d+)*)\s+([A-Za-z][^\r\n]+)")
+    for match in num_header_regex.finditer(chunk_text):
+        headers.append((match.start(), f"{match.group(1)} {match.group(2).strip()}"))
+
+    # Sort headers by start index
+    headers.sort(key=lambda x: x[0])
+
+    active_title = None
+    for start, title in headers:
+        if start <= sent_idx:
+            active_title = title
+        else:
+            break
+
+    return active_title if active_title is not None else fallback_header
+
+
 def generate_offline_grounded_answer(
     question: str,
     hits: Sequence[RetrievalHit],
@@ -444,9 +476,12 @@ def generate_offline_grounded_answer(
                         # Skip empty or very short lines (like headers or category labels)
                         continue
 
+                    # Determine exact active section header for this sentence inside the chunk
+                    exact_section = find_active_header_in_chunk(chunk.text, cleaned_sent, chunk.section_header)
+
                     citation = Citation(
                         source=chunk.source,
-                        section=chunk.section_header,
+                        section=exact_section,
                         page=chunk.metadata.get("page_number"),
                         snippet=cleaned_body,
                         confidence=hit.confidence_score,

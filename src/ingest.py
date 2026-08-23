@@ -677,7 +677,24 @@ def chunk_document(
 
     for idx, (chunk_text, (start_char, end_char)) in enumerate(zip(raw_chunk_texts, offsets)):
         chunk_id = f"{doc.doc_id}#chunk_{idx:04d}"
-        active_header, hierarchy = find_active_section(start_char, section_spans)
+        
+        # Check if any section headers start inside the boundaries of this chunk
+        headers_in_chunk = [span for span in section_spans if start_char <= span["start"] < end_char]
+        if headers_in_chunk:
+            # Use the last header starting inside the chunk as the active one
+            active_span = headers_in_chunk[-1]
+            hierarchy = []
+            for span in section_spans:
+                if span["start"] <= active_span["start"]:
+                    level = span["level"]
+                    while hierarchy and len(hierarchy) >= level:
+                        hierarchy.pop()
+                    hierarchy.append(span["title"])
+                else:
+                    break
+            active_header = active_span["title"]
+        else:
+            active_header, hierarchy = find_active_section(start_char, section_spans)
 
         chunk_meta: Dict[str, Any] = {
             **doc.metadata,
