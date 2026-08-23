@@ -158,3 +158,49 @@ class TestCitations:
         assert len(cits) == 2
         assert cits[0].source == "file1.md"
         assert cits[1].source == "file2.md"
+
+
+class TestAbstentionAndGuardrails:
+    """Tests verifying that the engine NEVER guesses and abstains on outside knowledge."""
+
+    def test_world_knowledge_query_abstains_strictly(self) -> None:
+        # Create retriever with unrelated technical docs
+        chunk = DocumentChunk("c1", "d1", "Fast vector index search using cosine metric", 0, 48, 0, "db.md")
+        hit = RetrievalHit(chunk, 0.05, confidence_score=0.05)
+        ret_result = RetrievalResult(
+            query="What is the capital of Australia?",
+            hits=[hit],
+            is_confident=False,
+            top_confidence=0.05,
+        )
+
+        engine = AnswerEngine(min_confidence_threshold=0.25, offline_mode=True)
+        response = engine.generate_answer(
+            "What is the capital of Australia?",
+            retrieval_result=ret_result,
+        )
+
+        assert response.abstained
+        assert response.answer == STANDARD_ABSTENTION_MESSAGE
+        assert "Canberra" not in response.answer
+        assert len(response.citations) == 0
+
+    def test_general_knowledge_movie_director_abstains(self) -> None:
+        chunk = DocumentChunk("c1", "d1", "Chunking text recursively using separators", 0, 45, 0, "chunk.md")
+        hit = RetrievalHit(chunk, 0.02, confidence_score=0.02)
+        ret_result = RetrievalResult(
+            query="Who directed the movie Inception?",
+            hits=[hit],
+            is_confident=False,
+            top_confidence=0.02,
+        )
+
+        engine = AnswerEngine(min_confidence_threshold=0.25, offline_mode=True)
+        response = engine.generate_answer(
+            "Who directed the movie Inception?",
+            retrieval_result=ret_result,
+        )
+
+        assert response.abstained
+        assert response.answer == STANDARD_ABSTENTION_MESSAGE
+        assert "Nolan" not in response.answer
