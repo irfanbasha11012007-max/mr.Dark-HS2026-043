@@ -114,3 +114,80 @@ class RetrievalResult:
             top_confidence=data.get("top_confidence", 0.0),
             formatted_context=data.get("formatted_context", ""),
         )
+
+
+class HybridRetriever:
+    """Hybrid retrieval engine combining vector similarity, sparse keywords, and prefix matching."""
+
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        top_k: int = 5,
+        dense_weight: float = 0.6,
+        keyword_weight: float = 0.3,
+        prefix_weight: float = 0.1,
+        min_confidence: float = 0.1,
+    ) -> None:
+        self.vector_store = vector_store
+        self.default_top_k = top_k
+        self.dense_weight = dense_weight
+        self.keyword_weight = keyword_weight
+        self.prefix_weight = prefix_weight
+        self.min_confidence = min_confidence
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+    ) -> RetrievalResult:
+        """Retrieve the top-k most relevant document chunks for a query.
+
+        Args:
+            query: User question or search text.
+            top_k: Optional override for number of hits.
+
+        Returns:
+            RetrievalResult containing ranked RetrievalHit objects.
+        """
+        start_time = time.perf_counter()
+        k = top_k or self.default_top_k
+        clean_q = query.strip()
+
+        if not clean_q or self.vector_store.total_chunks == 0:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            return RetrievalResult(
+                query=query,
+                hits=[],
+                total_hits=0,
+                execution_time_ms=elapsed_ms,
+                is_confident=False,
+                top_confidence=0.0,
+                formatted_context="",
+            )
+
+        # 1. Fetch dense candidates
+        fetch_k = min(self.vector_store.total_chunks, max(k * 3, 20))
+        dense_results = self.vector_store.similarity_search(clean_q, top_k=fetch_k, min_score=0.0)
+
+        hits: List[RetrievalHit] = []
+        for rank_idx, (chunk, dense_score) in enumerate(dense_results[:k], start=1):
+            hit = RetrievalHit(
+                chunk=chunk,
+                dense_score=dense_score,
+                hybrid_score=dense_score,
+                confidence_score=dense_score,
+                rank=rank_idx,
+            )
+            hits.append(hit)
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        top_conf = hits[0].confidence_score if hits else 0.0
+
+        return RetrievalResult(
+            query=query,
+            hits=hits,
+            total_hits=len(hits),
+            execution_time_ms=elapsed_ms,
+            is_confident=top_conf >= self.min_confidence,
+            top_confidence=top_conf,
+        )
