@@ -88,6 +88,7 @@ class RetrievalResult:
     is_confident: bool = True
     top_confidence: float = 0.0
     formatted_context: str = ""
+    rejection_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize retrieval result into dictionary."""
@@ -99,6 +100,7 @@ class RetrievalResult:
             "is_confident": self.is_confident,
             "top_confidence": round(self.top_confidence, 4),
             "formatted_context": self.formatted_context,
+            "rejection_reason": self.rejection_reason,
         }
 
     @classmethod
@@ -113,6 +115,7 @@ class RetrievalResult:
             is_confident=data.get("is_confident", True),
             top_confidence=data.get("top_confidence", 0.0),
             formatted_context=data.get("formatted_context", ""),
+            rejection_reason=data.get("rejection_reason"),
         )
 
 
@@ -170,7 +173,7 @@ class HybridRetriever:
         dense_weight: float = 0.6,
         keyword_weight: float = 0.3,
         prefix_weight: float = 0.1,
-        min_confidence: float = 0.1,
+        min_confidence: float = 0.15,
         max_context_chars: int = 4000,
     ) -> None:
         self.vector_store = vector_store
@@ -227,19 +230,15 @@ class HybridRetriever:
         hybrid_score: float,
     ) -> float:
         """Calibrate raw similarity into a probabilistic confidence score in [0.0, 1.0]."""
-        # Baseline non-linear scaling of hybrid score
         if hybrid_score <= 0.01:
             return 0.0
 
-        # Calibrated blend with emphasis on agreement between dense and keyword channels
         base_confidence = 1.0 - math.exp(-2.2 * hybrid_score)
 
-        # Apply synergy boost if both channels agree strongly
         if dense_score > 0.4 and kw_score > 0.4:
             base_confidence = min(1.0, base_confidence * 1.15)
-        # Apply penalty if dense score is negligible and no lexical matches
         elif dense_score < 0.1 and kw_score == 0.0 and prefix_score == 0.0:
-            base_confidence = max(0.0, base_confidence * 0.3)
+            base_confidence = max(0.0, base_confidence * 0.2)
 
         return float(np.clip(base_confidence, 0.0, 1.0))
 
@@ -247,11 +246,25 @@ class HybridRetriever:
         self,
         query: str,
         top_k: Optional[int] = None,
+        min_confidence: Optional[float] = None,
+        filter_below_threshold: bool = False,
         format_context_block: bool = True,
     ) -> RetrievalResult:
-        """Retrieve the top-k most relevant document chunks for a query."""
+        """Retrieve the top-k most relevant document chunks for a query with threshold gating.
+
+        Args:
+            query: User question or search text.
+            top_k: Optional override for number of hits.
+            min_confidence: Optional confidence threshold override.
+            filter_below_threshold: If True, hits below threshold are excluded from output.
+            format_context_block: If True, builds formatted_context markdown.
+
+        Returns:
+            RetrievalResult containing ranked RetrievalHit objects and confidence metrics.
+        """
         start_time = time.perf_counter()
         k = top_k or self.default_top_k
+        thresh = min_confidence if min_confidence is not None else self.min_confidence
         clean_q = query.strip()
 
         if not clean_q or self.vector_store.total_chunks == 0:
@@ -264,6 +277,7 @@ class HybridRetriever:
                 is_confident=False,
                 top_confidence=0.0,
                 formatted_context="",
+                rejection_reason="Empty query or unpopulated vector store",
             )
 
         query_tokens = tokenize_query(clean_q)
@@ -277,7 +291,6 @@ class HybridRetriever:
             kw_score = self.compute_keyword_score(query_tokens, chunk.text, clean_q)
             prefix_score = self.compute_prefix_score(query_tokens, chunk.text)
 
-            # Fuse dense, keyword, and prefix scores
             combined_score = (
                 self.dense_weight * dense_score
                 + self.keyword_weight * kw_score
@@ -298,20 +311,26 @@ class HybridRetriever:
         scored_candidates.sort(key=lambda h: h.hybrid_score, reverse=True)
 
         top_hits = scored_candidates[:k]
+        top_conf = top_hits[0].confidence_score if top_hits else 0.0
+        is_confident = top_conf >= thresh
+
+        if filter_below_threshold:
+            top_hits = [h for h in top_hits if h.confidence_score >= thresh]
+
         for rank_idx, hit in enumerate(top_hits, start=1):
             hit.rank = rank_idx
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        top_conf = top_hits[0].confidence_score if top_hits else 0.0
-
-        ctx = format_context(top_hits, max_characters=self.max_context_chars) if format_context_block else ""
+        rejection = None if is_confident else f"Top retrieval confidence ({top_conf:.3f}) below threshold ({thresh:.3f})"
+        ctx = format_context(top_hits, max_characters=self.max_context_chars) if format_context_block and is_confident else ""
 
         return RetrievalResult(
             query=query,
             hits=top_hits,
             total_hits=len(top_hits),
             execution_time_ms=elapsed_ms,
-            is_confident=top_conf >= self.min_confidence,
+            is_confident=is_confident,
             top_confidence=top_conf,
             formatted_context=ctx,
+            rejection_reason=rejection,
         )
