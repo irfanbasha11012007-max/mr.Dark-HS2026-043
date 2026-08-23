@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,6 +120,60 @@ class DocumentChunk:
         )
 
 
+def clean_text(
+    text: str,
+    clean_whitespace: bool = True,
+    normalize_unicode: bool = True,
+    fix_linebreaks: bool = True,
+    remove_control_chars: bool = True,
+) -> str:
+    """Clean and normalize raw document text.
+
+    Args:
+        text: Input raw string.
+        clean_whitespace: Collapse extra spaces and limit consecutive newlines.
+        normalize_unicode: Apply Unicode NFKC normalization and replace non-breaking spaces.
+        fix_linebreaks: Convert \\r\\n and \\r to \\n.
+        remove_control_chars: Strip non-printable and zero-width characters.
+
+    Returns:
+        Cleaned text string.
+    """
+    if not text:
+        return ""
+
+    cleaned = text
+
+    # Standardize line breaks
+    if fix_linebreaks:
+        cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Normalize Unicode representations (NFKC) and common problematic characters
+    if normalize_unicode:
+        cleaned = unicodedata.normalize("NFKC", cleaned)
+        cleaned = cleaned.replace("\u00a0", " ").replace("\u200b", "").replace("\ufeff", "")
+        cleaned = cleaned.replace("\u200c", "").replace("\u200d", "")
+
+    # Remove non-standard control characters (except newline, tab)
+    if remove_control_chars:
+        cleaned = "".join(
+            ch for ch in cleaned
+            if ch in ("\n", "\t") or (unicodedata.category(ch) != "Cc" and unicodedata.category(ch) != "Cf")
+        )
+
+    # Whitespace cleanup
+    if clean_whitespace:
+        # Strip trailing space on each line
+        lines = [re.sub(r"[ \t]+$", "", line) for line in cleaned.split("\n")]
+        cleaned = "\n".join(lines)
+        # Collapse 3 or more consecutive newlines into 2
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        # Collapse multiple horizontal whitespace within lines (excluding indentations on clean lines)
+        cleaned = re.sub(r"[^\S\n]+", " ", cleaned)
+
+    return cleaned.strip()
+
+
 def generate_doc_id(file_path: Union[str, Path], content: Optional[str] = None) -> str:
     """Generate a deterministic document identifier from path and optional content hash."""
     path_obj = Path(file_path)
@@ -176,11 +231,7 @@ def load_text_document(file_path: Union[str, Path]) -> Document:
 
 
 def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
-    """Parse optional YAML/metadata frontmatter block at the top of markdown files.
-
-    Returns:
-        A tuple of (frontmatter_dict, remaining_body_text).
-    """
+    """Parse optional YAML/metadata frontmatter block at the top of markdown files."""
     frontmatter: Dict[str, Any] = {}
     if not text.startswith("---"):
         return frontmatter, text
@@ -199,7 +250,6 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
         key, val = line.split(":", 1)
         key = key.strip()
         val = val.strip().strip("\"'")
-        # Convert simple types
         if val.lower() == "true":
             frontmatter[key] = True
         elif val.lower() == "false":
@@ -217,11 +267,9 @@ def load_markdown_document(file_path: Union[str, Path], strip_frontmatter: bool 
     raw_doc = load_text_document(file_path)
     frontmatter, body = parse_frontmatter(raw_doc.content)
 
-    # Extract all markdown headers
     headers = re.findall(r"^(#{1,6})\s+(.+)$", raw_doc.content, flags=re.MULTILINE)
     detected_headers = [{"level": len(h[0]), "title": h[1].strip()} for h in headers]
 
-    # Extract title if present (first H1 or frontmatter title)
     title = frontmatter.get("title")
     if not title:
         for h in detected_headers:
@@ -249,18 +297,7 @@ def load_markdown_document(file_path: Union[str, Path], strip_frontmatter: bool 
 
 
 def load_pdf_document(file_path: Union[str, Path]) -> Document:
-    """Load a PDF document page by page using pypdf.
-
-    Args:
-        file_path: Path to the PDF file.
-
-    Returns:
-        Document instance with per-page text, page offsets, and PDF metadata.
-
-    Raises:
-        FileNotFoundError: If the PDF does not exist.
-        ValueError: If file is not a valid or readable PDF.
-    """
+    """Load a PDF document page by page using pypdf."""
     path = Path(file_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"PDF file not found: {file_path}")
@@ -292,14 +329,12 @@ def load_pdf_document(file_path: Union[str, Path]) -> Document:
             "end_char": current_char_offset + page_len,
             "char_count": page_len,
         })
-        # Account for page separator newline
         current_char_offset += page_len + 1
 
     full_content = "\n".join(page_texts)
     file_stat = path.stat()
     doc_id = generate_doc_id(path, full_content)
 
-    # Extract standard PDF metadata if present
     pdf_info: Dict[str, Any] = {}
     if reader.metadata:
         for k, v in reader.metadata.items():
@@ -347,7 +382,6 @@ def load_document(file_path: Union[str, Path], config: Optional[IngestionConfig]
     elif ext == ".pdf":
         return load_pdf_document(path)
     else:
-        # Fallback to plain text for generic supported extensions
         return load_text_document(path)
 
 
@@ -356,16 +390,7 @@ def load_directory(
     recursive: bool = True,
     config: Optional[IngestionConfig] = None,
 ) -> List[Document]:
-    """Scan and load all supported documents from a directory.
-
-    Args:
-        dir_path: Path to directory.
-        recursive: Whether to scan subdirectories recursively.
-        config: Ingestion configuration.
-
-    Returns:
-        List of loaded Document objects.
-    """
+    """Scan and load all supported documents from a directory."""
     path = Path(dir_path).resolve()
     if not path.exists() or not path.is_dir():
         raise FileNotFoundError(f"Directory not found: {dir_path}")
