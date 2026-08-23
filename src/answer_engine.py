@@ -43,6 +43,22 @@ Do NOT explain what is missing, do NOT apologize, do NOT provide partial guesses
 
 
 @dataclass
+class GenerationConfig:
+    """Configuration parameters for LLM text generation and grounding."""
+
+    temperature: float = 0.0
+    max_tokens: int = 1024
+    top_p: float = 1.0
+    seed: Optional[int] = 42
+    timeout_seconds: float = 20.0
+    max_retries: int = 3
+    retry_backoff_factor: float = 1.5
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Citation:
     """Represents an exact source provenance citation for a grounded answer."""
 
@@ -147,12 +163,12 @@ class LLMClient:
         api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
         default_model: str = "openai/gpt-4o-mini",
-        timeout_seconds: float = 20.0,
+        config: Optional[GenerationConfig] = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
-        self.timeout_seconds = timeout_seconds
+        self.config = config or GenerationConfig()
 
     @property
     def is_available(self) -> bool:
@@ -163,22 +179,25 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         model: Optional[str] = None,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
+        config_override: Optional[GenerationConfig] = None,
     ) -> Dict[str, Any]:
         """Send chat completion request to the API."""
         if not self.is_available:
             raise ValueError("LLMClient is not configured with an API key")
 
+        cfg = config_override or self.config
         target_model = model or self.default_model
         endpoint = f"{self.base_url}/chat/completions"
 
-        payload = {
+        payload: Dict[str, Any] = {
             "model": target_model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "temperature": cfg.temperature,
+            "max_tokens": cfg.max_tokens,
+            "top_p": cfg.top_p,
         }
+        if cfg.seed is not None:
+            payload["seed"] = cfg.seed
 
         headers = {
             "Content-Type": "application/json",
@@ -190,7 +209,7 @@ class LLMClient:
         data_bytes = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(endpoint, data=data_bytes, headers=headers, method="POST")
 
-        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
+        with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as response:
             res_body = json.loads(response.read().decode("utf-8"))
 
         choice = res_body.get("choices", [{}])[0]
@@ -225,17 +244,20 @@ class AnswerEngine:
         retriever: Optional[HybridRetriever] = None,
         llm_client: Optional[LLMClient] = None,
         model_name: str = "openai/gpt-4o-mini",
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
+        generation_config: Optional[GenerationConfig] = None,
         min_confidence_threshold: float = 0.20,
     ) -> None:
         self.retriever = retriever
-        self.llm_client = llm_client or LLMClient(default_model=model_name)
+        self.generation_config = generation_config or GenerationConfig()
+        self.llm_client = llm_client or LLMClient(default_model=model_name, config=self.generation_config)
         self.model_name = model_name
-        self.temperature = temperature
-        self.max_tokens = max_tokens
         self.min_confidence_threshold = min_confidence_threshold
-        logger.info("Initialized AnswerEngine (model=%s, temp=%.2f)", model_name, temperature)
+        logger.info(
+            "Initialized AnswerEngine (model=%s, temp=%.2f, max_tokens=%d)",
+            model_name,
+            self.generation_config.temperature,
+            self.generation_config.max_tokens,
+        )
 
     def generate_answer(
         self,
