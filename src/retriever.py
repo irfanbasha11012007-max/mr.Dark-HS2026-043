@@ -116,6 +116,52 @@ class RetrievalResult:
         )
 
 
+def format_context(
+    hits: Sequence[RetrievalHit],
+    max_characters: int = 4000,
+    include_provenance: bool = True,
+) -> str:
+    """Format a list of retrieval hits into a clean structured Markdown context block.
+
+    Args:
+        hits: Sequence of ranked RetrievalHit objects.
+        max_characters: Maximum length ceiling for the accumulated context string.
+        include_provenance: If True, includes source file, section, page, and score metadata.
+
+    Returns:
+        Structured Markdown context string ready for LLM prompt augmentation.
+    """
+    if not hits:
+        return ""
+
+    context_blocks: List[str] = []
+    current_char_count = 0
+
+    for idx, hit in enumerate(hits, start=1):
+        chunk = hit.chunk
+        meta = chunk.metadata
+        file_name = meta.get("file_name", Path(chunk.source).name if chunk.source else "Document")
+        section = chunk.section_header or "General"
+        page = meta.get("page_number")
+        page_str = f" | Page: {page}" if page is not None else ""
+
+        if include_provenance:
+            header = f"### [Source {idx}: {file_name} | Section: {section}{page_str} | Score: {hit.confidence_score:.2f}]"
+            block = f"{header}\n{chunk.text.strip()}"
+        else:
+            block = f"--- Document {idx} ---\n{chunk.text.strip()}"
+
+        block_len = len(block) + 2  # Account for double newline separator
+        if current_char_count + block_len > max_characters and context_blocks:
+            # Reached budget ceiling, truncate gracefully
+            break
+
+        context_blocks.append(block)
+        current_char_count += block_len
+
+    return "\n\n".join(context_blocks)
+
+
 class HybridRetriever:
     """Hybrid retrieval engine combining vector similarity, sparse keywords, and prefix matching."""
 
@@ -127,6 +173,7 @@ class HybridRetriever:
         keyword_weight: float = 0.3,
         prefix_weight: float = 0.1,
         min_confidence: float = 0.1,
+        max_context_chars: int = 4000,
     ) -> None:
         self.vector_store = vector_store
         self.default_top_k = top_k
@@ -134,20 +181,23 @@ class HybridRetriever:
         self.keyword_weight = keyword_weight
         self.prefix_weight = prefix_weight
         self.min_confidence = min_confidence
+        self.max_context_chars = max_context_chars
 
     def retrieve(
         self,
         query: str,
         top_k: Optional[int] = None,
+        format_context_block: bool = True,
     ) -> RetrievalResult:
         """Retrieve the top-k most relevant document chunks for a query.
 
         Args:
             query: User question or search text.
             top_k: Optional override for number of hits.
+            format_context_block: If True, builds formatted_context markdown.
 
         Returns:
-            RetrievalResult containing ranked RetrievalHit objects.
+            RetrievalResult containing ranked RetrievalHit objects and formatted context.
         """
         start_time = time.perf_counter()
         k = top_k or self.default_top_k
@@ -165,7 +215,6 @@ class HybridRetriever:
                 formatted_context="",
             )
 
-        # 1. Fetch dense candidates
         fetch_k = min(self.vector_store.total_chunks, max(k * 3, 20))
         dense_results = self.vector_store.similarity_search(clean_q, top_k=fetch_k, min_score=0.0)
 
@@ -183,6 +232,8 @@ class HybridRetriever:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         top_conf = hits[0].confidence_score if hits else 0.0
 
+        ctx = format_context(hits, max_characters=self.max_context_chars) if format_context_block else ""
+
         return RetrievalResult(
             query=query,
             hits=hits,
@@ -190,4 +241,5 @@ class HybridRetriever:
             execution_time_ms=elapsed_ms,
             is_confident=top_conf >= self.min_confidence,
             top_confidence=top_conf,
+            formatted_context=ctx,
         )
