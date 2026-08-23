@@ -167,6 +167,77 @@ def generate_doc_id(file_path: Union[str, Path], content: Optional[str] = None) 
     return f"{path_obj.stem}_{path_hash}"
 
 
+def extract_section_spans(text: str) -> List[Dict[str, Any]]:
+    """Detect section headings and their character ranges in document text.
+
+    Supports Markdown headers (# to ######) as well as numbered / capitalized section headings.
+    """
+    section_spans: List[Dict[str, Any]] = []
+
+    # Pattern 1: Markdown headers (# Header)
+    md_header_regex = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+    for match in md_header_regex.finditer(text):
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        section_spans.append({
+            "start": match.start(),
+            "end": match.end(),
+            "level": level,
+            "title": title,
+            "raw": match.group(0),
+        })
+
+    # Pattern 2: Numbered section titles (e.g. '1. Introduction', 'Section 2.3 System Architecture')
+    if not section_spans:
+        num_header_regex = re.compile(r"^(?:Section\s+)?(\d+(?:\.\d+)*)\s+([A-Z][^\n\r]+)$", re.MULTILINE)
+        for match in num_header_regex.finditer(text):
+            sec_num = match.group(1)
+            title = match.group(2).strip()
+            level = len(sec_num.split("."))
+            section_spans.append({
+                "start": match.start(),
+                "end": match.end(),
+                "level": level,
+                "title": f"{sec_num} {title}",
+                "raw": match.group(0),
+            })
+
+    # Sort spans by their occurrence index
+    section_spans.sort(key=lambda s: s["start"])
+    return section_spans
+
+
+def find_active_section(char_offset: int, section_spans: Sequence[Dict[str, Any]]) -> Tuple[Optional[str], List[str]]:
+    """Determine the active section header and hierarchical trail for a given character offset.
+
+    Returns:
+        A tuple of (active_header_str, hierarchy_list).
+    """
+    if not section_spans:
+        return None, []
+
+    # Find the most recent section preceding or starting at char_offset
+    active_span: Optional[Dict[str, Any]] = None
+    hierarchy: List[str] = []
+
+    for span in section_spans:
+        if span["start"] <= char_offset:
+            active_span = span
+            # Maintain hierarchical tree
+            level = span["level"]
+            # Pop deeper or equal levels
+            while hierarchy and len(hierarchy) >= level:
+                hierarchy.pop()
+            hierarchy.append(span["title"])
+        else:
+            break
+
+    if active_span is None:
+        return None, []
+
+    return active_span["title"], list(hierarchy)
+
+
 def load_text_document(file_path: Union[str, Path]) -> Document:
     """Load a plain text document with multi-encoding fallback support."""
     path = Path(file_path).resolve()
@@ -475,7 +546,6 @@ class RecursiveCharacterChunker:
             return ""
 
         overlap_slice = previous_chunk[-self.chunk_overlap:]
-        # Find earliest natural boundary in the overlap slice to avoid chopped words
         for delimiter in ("\n\n", "\n", ". ", "? ", "! ", " "):
             idx = overlap_slice.find(delimiter)
             if idx != -1 and idx + len(delimiter) < len(overlap_slice):
@@ -529,7 +599,6 @@ class RecursiveCharacterChunker:
             prefix = self._extract_overlap_prefix(prev_chunk)
             if prefix and not curr_chunk.startswith(prefix):
                 combined = (prefix + " " + curr_chunk).strip()
-                # Ensure combined does not excessively exceed chunk_size + overlap
                 if len(combined) <= self.chunk_size + self.chunk_overlap:
                     overlapped_chunks.append(combined)
                 else:
