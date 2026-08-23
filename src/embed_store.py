@@ -7,10 +7,13 @@ This module defines the abstract embedding model interface, concrete embedding i
 from __future__ import annotations
 
 import abc
+import argparse
 import hashlib
 import json
 import logging
 import pickle
+import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -417,15 +420,7 @@ class VectorStore:
         directory: Union[str, Path],
         embedding_model: Optional[BaseEmbeddingModel] = None,
     ) -> "VectorStore":
-        """Load a persisted VectorStore from disk.
-
-        Args:
-            directory: Directory containing saved index files.
-            embedding_model: Optional embedding model override.
-
-        Returns:
-            Reconstituted VectorStore instance.
-        """
+        """Load a persisted VectorStore from disk."""
         dir_path = Path(directory).resolve()
         if not dir_path.exists() or not dir_path.is_dir():
             raise FileNotFoundError(f"VectorStore directory not found: {directory}")
@@ -443,7 +438,6 @@ class VectorStore:
 
         normalize_embeddings = config_data.get("normalize_embeddings", True)
 
-        # Load or reconstruct embedding model
         model = embedding_model
         if model is None:
             if model_file.exists():
@@ -463,7 +457,6 @@ class VectorStore:
             normalize_embeddings=normalize_embeddings,
         )
 
-        # Load chunks
         with open(chunks_file, "r", encoding="utf-8") as f:
             chunks_raw = json.load(f)
 
@@ -472,7 +465,6 @@ class VectorStore:
             store.chunks.append(chunk)
             store._chunk_id_to_idx[chunk.chunk_id] = idx
 
-        # Load embeddings matrix
         if embeddings_file.exists():
             data = np.load(embeddings_file)
             store.embeddings = data["embeddings"].astype(np.float32)
@@ -484,3 +476,137 @@ class VectorStore:
             store.dimension,
         )
         return store
+
+
+def build_vector_store_from_jsonl(
+    jsonl_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    model_type: str = "tfidf",
+    dimension: Optional[int] = None,
+) -> VectorStore:
+    """Read DocumentChunk JSONL file, embed all chunks, and save VectorStore index."""
+    start_time = time.time()
+    in_file = Path(jsonl_path).resolve()
+    out_dir = Path(output_dir).resolve()
+
+    if not in_file.exists():
+        raise FileNotFoundError(f"Chunks JSONL file not found: {jsonl_path}")
+
+    chunks: List[DocumentChunk] = []
+    with open(in_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line_str = line.strip()
+            if line_str:
+                chunks.append(DocumentChunk.from_dict(json.loads(line_str)))
+
+    if not chunks:
+        logger.warning("No chunks found in %s", jsonl_path)
+
+    # Initialize embedding model
+    kwargs: Dict[str, Any] = {}
+    if dimension:
+        if model_type == "tfidf":
+            kwargs["max_features"] = dimension
+        else:
+            kwargs["dimension"] = dimension
+
+    embedding_model = get_default_embedding_model(model_type, **kwargs)
+
+    # Fit TF-IDF model if necessary
+    if isinstance(embedding_model, TfidfEmbeddingModel) and chunks:
+        texts = [c.text for c in chunks]
+        embedding_model.fit(texts)
+
+    store = VectorStore(embedding_model=embedding_model, normalize_embeddings=True)
+    store.add_chunks(chunks)
+    store.save(out_dir)
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "Built and persisted VectorStore: %d chunks -> %s in %.2fs",
+        len(chunks),
+        out_dir,
+        elapsed,
+    )
+    return store
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    """Build argument parser for the embed_store CLI."""
+    parser = argparse.ArgumentParser(
+        description="Knowledge Assistant - Vector Store & Index Builder CLI",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--input",
+        "-i",
+        dest="input_path",
+        default="data/processed/chunks.jsonl",
+        help="Path to input chunks JSONL file",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        dest="output_dir",
+        default="data/index",
+        help="Target directory to save vector index artifacts",
+    )
+    parser.add_argument(
+        "--model",
+        "-m",
+        choices=["tfidf", "dense"],
+        default="tfidf",
+        help="Embedding model type",
+    )
+    parser.add_argument(
+        "--dimension",
+        "-d",
+        type=int,
+        default=None,
+        help="Vector dimensionality override",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging level",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Main CLI entrypoint for building/rebuilding the VectorStore."""
+    parser = build_cli_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    try:
+        store = build_vector_store_from_jsonl(
+            jsonl_path=args.input_path,
+            output_dir=args.output_dir,
+            model_type=args.model,
+            dimension=args.dimension,
+        )
+
+        print("\n" + "=" * 55)
+        print("  VECTOR STORE INDEXING COMPLETED")
+        print("=" * 55)
+        print(f"  Total Chunks Indexed : {store.total_chunks}")
+        print(f"  Embedding Model      : {store.embedding_model.model_name}")
+        print(f"  Vector Dimensionality: {store.dimension}")
+        print(f"  Index Output Path    : {Path(args.output_dir).resolve()}")
+        print("=" * 55 + "\n")
+        return 0
+
+    except Exception as e:
+        logger.error("Failed to build vector store: %s", e, exc_info=True)
+        print(f"\n[ERROR] Failed to build vector store: {e}\n", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
