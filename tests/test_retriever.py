@@ -124,7 +124,6 @@ class TestEmbeddingModels:
 
         q_vec = model.embed_query("alpha gamma")
         assert q_vec.shape == (64,)
-        # Check unit normalization
         norm = np.linalg.norm(q_vec)
         assert pytest.approx(norm, rel=1e-3) == 1.0
 
@@ -188,7 +187,7 @@ class TestHybridRetrieverRanking:
         assert "precision" in tokens
         assert "rag" in tokens
         assert "systems" in tokens
-        assert "is" not in tokens  # Stop word filtered
+        assert "is" not in tokens
 
     def test_hybrid_ranking_top_hit_matches_query_intent(self, vector_store: VectorStore) -> None:
         retriever = HybridRetriever(vector_store, top_k=3)
@@ -208,3 +207,46 @@ class TestHybridRetrieverRanking:
         assert "### [Source 1:" in res.formatted_context
         assert "rag_overview.md" in res.formatted_context
         assert len(res.formatted_context) <= 500
+
+
+class TestThresholdGatingAndConfidence:
+    """Tests for confidence threshold gating, rejection handling, and out-of-scope queries."""
+
+    def test_out_of_scope_query_triggers_low_confidence(self, vector_store: VectorStore) -> None:
+        retriever = HybridRetriever(vector_store, min_confidence=0.4)
+        res = retriever.retrieve("Supernova nucleosynthesis stellar astrophysics")
+        assert not res.is_confident
+        assert res.top_confidence < 0.4
+        assert res.rejection_reason is not None
+        assert "below threshold" in res.rejection_reason
+        assert res.formatted_context == ""
+
+    def test_filter_below_threshold_option(self, vector_store: VectorStore) -> None:
+        retriever = HybridRetriever(vector_store)
+        res = retriever.retrieve(
+            "Neapolitan pizza dough",
+            min_confidence=0.2,
+            filter_below_threshold=True,
+        )
+        assert res.is_confident
+        assert all(h.confidence_score >= 0.2 for h in res.hits)
+
+    def test_confidence_calibration_monotonicity(self, vector_store: VectorStore) -> None:
+        retriever = HybridRetriever(vector_store)
+        c_low = retriever.calibrate_confidence(0.05, 0.0, 0.0, 0.05)
+        c_med = retriever.calibrate_confidence(0.4, 0.3, 0.2, 0.35)
+        c_high = retriever.calibrate_confidence(0.9, 0.8, 0.5, 0.85)
+
+        assert 0.0 <= c_low < c_med < c_high <= 1.0
+
+    def test_empty_query_and_empty_store_handling(self) -> None:
+        empty_store = VectorStore()
+        retriever = HybridRetriever(empty_store)
+
+        res_empty_store = retriever.retrieve("test query")
+        assert res_empty_store.total_hits == 0
+        assert not res_empty_store.is_confident
+
+        res_empty_q = retriever.retrieve("")
+        assert res_empty_q.total_hits == 0
+        assert not res_empty_q.is_confident
