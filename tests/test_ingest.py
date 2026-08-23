@@ -12,7 +12,9 @@ from src.ingest import (
     DocumentChunk,
     clean_text,
     generate_doc_id,
+    load_markdown_document,
     load_text_document,
+    parse_frontmatter,
 )
 
 
@@ -75,3 +77,66 @@ class TestTextDocumentLoader:
         id2 = generate_doc_id(file_path, content)
         assert id1 == id2
         assert "doc1" in id1
+
+
+class TestMarkdownDocumentLoader:
+    """Test suite for Markdown document loading and frontmatter parsing."""
+
+    def test_load_markdown_basic(self, tmp_path: Path):
+        md_file = tmp_path / "guide.md"
+        content = "# Getting Started\nWelcome to the knowledge base.\n\n## Installation\nRun `pip install -r requirements.txt`."
+        md_file.write_text(content, encoding="utf-8")
+
+        doc = load_markdown_document(md_file)
+        assert doc.doc_type == "markdown"
+        assert doc.metadata["title"] == "Getting Started"
+        assert doc.metadata["header_count"] == 2
+        assert doc.metadata["headers"][0] == {"level": 1, "title": "Getting Started"}
+        assert doc.metadata["headers"][1] == {"level": 2, "title": "Installation"}
+
+    def test_load_markdown_with_frontmatter(self, tmp_path: Path):
+        md_file = tmp_path / "article.md"
+        content = """---
+title: System Architecture
+author: Harivarman
+draft: false
+version: 2
+---
+# Overview
+This document describes the core ingestion subsystem.
+"""
+        md_file.write_text(content, encoding="utf-8")
+
+        doc = load_markdown_document(md_file)
+        assert doc.metadata["frontmatter"]["title"] == "System Architecture"
+        assert doc.metadata["frontmatter"]["author"] == "Harivarman"
+        assert doc.metadata["frontmatter"]["draft"] is False
+        assert doc.metadata["frontmatter"]["version"] == 2
+        assert doc.metadata["title"] == "System Architecture"
+
+    def test_load_markdown_strip_frontmatter(self, tmp_path: Path):
+        md_file = tmp_path / "clean_article.md"
+        content = """---
+title: API Spec
+version: 1
+---
+# Endpoint Reference
+GET /api/v1/health
+"""
+        md_file.write_text(content, encoding="utf-8")
+
+        doc = load_markdown_document(md_file, strip_frontmatter=True)
+        assert not doc.content.startswith("---")
+        assert doc.content.startswith("# Endpoint Reference")
+        assert doc.metadata["frontmatter"]["title"] == "API Spec"
+
+    def test_parse_frontmatter_edge_cases(self):
+        # Missing closing marker
+        fm, body = parse_frontmatter("---\ntitle: Incomplete\nno closing marker")
+        assert fm == {}
+        assert "Incomplete" in body
+
+        # Plain text without frontmatter
+        fm, body = parse_frontmatter("Just a regular string without frontmatter.")
+        assert fm == {}
+        assert body == "Just a regular string without frontmatter."
