@@ -219,6 +219,30 @@ class HybridRetriever:
 
         return float(min(1.0, prefix_matches / len(query_tokens)))
 
+    def calibrate_confidence(
+        self,
+        dense_score: float,
+        kw_score: float,
+        prefix_score: float,
+        hybrid_score: float,
+    ) -> float:
+        """Calibrate raw similarity into a probabilistic confidence score in [0.0, 1.0]."""
+        # Baseline non-linear scaling of hybrid score
+        if hybrid_score <= 0.01:
+            return 0.0
+
+        # Calibrated blend with emphasis on agreement between dense and keyword channels
+        base_confidence = 1.0 - math.exp(-2.2 * hybrid_score)
+
+        # Apply synergy boost if both channels agree strongly
+        if dense_score > 0.4 and kw_score > 0.4:
+            base_confidence = min(1.0, base_confidence * 1.15)
+        # Apply penalty if dense score is negligible and no lexical matches
+        elif dense_score < 0.1 and kw_score == 0.0 and prefix_score == 0.0:
+            base_confidence = max(0.0, base_confidence * 0.3)
+
+        return float(np.clip(base_confidence, 0.0, 1.0))
+
     def retrieve(
         self,
         query: str,
@@ -259,13 +283,15 @@ class HybridRetriever:
                 + self.keyword_weight * kw_score
                 + self.prefix_weight * prefix_score
             )
+            confidence = self.calibrate_confidence(dense_score, kw_score, prefix_score, combined_score)
+
             hit = RetrievalHit(
                 chunk=chunk,
                 dense_score=dense_score,
                 keyword_score=kw_score,
                 prefix_score=prefix_score,
                 hybrid_score=combined_score,
-                confidence_score=combined_score,
+                confidence_score=confidence,
             )
             scored_candidates.append(hit)
 
