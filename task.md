@@ -37,6 +37,28 @@
 - [x] Comprehensive unit and integration test suite (`tests/test_retriever.py`)
 - [x] Retrieval architecture and pipeline documentation (`docs/retrieval.md`)
 
+## Member 3 Tasks — Phase 3: Answer Engine + Grounding + Abstention (@irfanbasha11012007-max)
+- [x] Answer Engine core class (`AnswerEngine` in `src/answer_engine.py`)
+- [x] Strict grounding system prompt with zero-hallucination mandate (`STRICT_SYSTEM_PROMPT`)
+- [x] Structured provenance citation model (`Citation` with formatters)
+- [x] Complete response serialization model (`AnswerResponse`)
+- [x] OpenRouter / OpenAI LLM HTTP client (`LLMClient`)
+- [x] Generation configuration parameters (`GenerationConfig` with temperature 0.0)
+- [x] Confidence-based abstention evaluator (`evaluate_confidence_abstention`)
+- [x] Context sufficiency check against query keywords (`verify_context_sufficiency`)
+- [x] Standard exact refusal normalization: `"I don't have that information in the provided material."`
+- [x] Deterministic offline extractive grounded synthesizer (`generate_offline_grounded_answer`)
+- [x] Inline citation parser and chunk binder (`parse_and_bind_citations`)
+- [x] Configurable API timeout enforcement (`timeout_seconds`)
+- [x] Exponential backoff retry handler for transient errors (`max_retries`, `retry_backoff_factor`)
+- [x] Prompt injection sanitization and override neutralization (`sanitize_prompt_input`)
+- [x] Answer Engine CLI entry point (`python -m src.answer_engine`)
+- [x] Grounded answer generation tests (`tests/test_answer_engine.py`)
+- [x] Citation mapping and serialization tests
+- [x] World knowledge abstention tests (capitals, movies)
+- [x] Missing / partial information refusal tests
+- [x] Prompt injection defense tests
+- [x] Phase 3 architecture and grounding rules documentation (`docs/answer_engine.md`)
+
 ## Next Phases (Other Members)
-- [ ] Phase 3: LLM Generation & Grounding (Member 3)
 - [ ] Phase 4: Streamlit UI & Evaluation Execution (Member 4)

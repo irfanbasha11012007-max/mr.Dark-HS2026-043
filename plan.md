@@ -20,10 +20,13 @@ graph TD
         Retriever --> ConfidenceGate[Confidence & Threshold Gate]
     end
 
-    subgraph Phase 3 [Phase 3: Generation & Grounding - Member 3]
-        ConfidenceGate --> ContextBuilder[Context Assembler]
-        ContextBuilder --> LLM[LLM Answer Generator]
-        LLM --> Citations[Citations & Source Grounding]
+    subgraph Phase 3 [Phase 3: Generation & Grounding - Member 3: @irfanbasha11012007-max]
+        ConfidenceGate --> SufficiencyCheck[Context Sufficiency Check]
+        SufficiencyCheck --> AnswerEngine[Answer Engine]
+        AnswerEngine --> Guardrails[Zero-Hallucination Guardrails]
+        AnswerEngine --> LiveLLM[Live OpenRouter/OpenAI API]
+        AnswerEngine --> OfflineFallback[Offline Extractive Synthesizer]
+        Guardrails --> Citations[Citations & Source Provenance]
     end
 
     subgraph Phase 4 [Phase 4: Interface & Evaluation Runner - Member 4]
@@ -56,10 +59,16 @@ graph TD
    - Unit & integration test suite (`tests/test_retriever.py`)
    - Retrieval architecture documentation (`docs/retrieval.md`)
 
-3. **Phase 3: LLM Generation & Grounding (Member 3)**
-   - Prompt templates and context assembly
-   - LLM generation with citation grounding
-   - Hallucination prevention and boundary guardrails
+3. **Phase 3: Answer Engine + Grounding + Abstention (Completed - Member 3: @irfanbasha11012007-max)**
+   - Answer Engine core orchestrator (`src/answer_engine.py`)
+   - Strict zero-hallucination system prompt and context encapsulation
+   - Standard exact abstention response (`"I don't have that information in the provided material."`)
+   - Multi-tier guardrails: confidence gating (<0.20), keyword context sufficiency, prompt injection sanitization
+   - Live LLM client with timeout and exponential backoff retry loop
+   - High-reliability offline grounded extractive synthesizer fallback
+   - Structured citation provenance mapping (`Citation`, `parse_and_bind_citations`)
+   - 13 comprehensive unit & integration tests (`tests/test_answer_engine.py`)
+   - Technical grounding documentation (`docs/answer_engine.md`)
 
 4. **Phase 4: UI & End-to-End Evaluation (Member 4)**
    - Streamlit user interface

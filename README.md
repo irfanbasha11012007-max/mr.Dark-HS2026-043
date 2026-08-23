@@ -10,8 +10,8 @@ Knowledge Assistant is an enterprise-grade AI knowledge retrieval and question-a
 |---|---|---|---|
 | **Member 1 (@harivarman-007)** | `feature/ingest-eval` | **Phase 1: Document Ingestion + Evaluation** | `src/config.py`, `src/ingest.py`, `tests/test_ingest.py`, `evaluation/eval_questions.jsonl`, `docs/ingestion.md` |
 | **Member 2 (@mrdark5133)** | `feature/retriever` | **Phase 2: Embeddings & Hybrid Retrieval** | `src/embed_store.py`, `src/retriever.py`, `tests/test_retriever.py`, `docs/retrieval.md` |
-| **Member 3** | `feature/generation-rag` | **Phase 3: LLM Generation & Citations** | Context assembly, prompt engineering, grounded answer generation |
-| **Member 4** | `feature/ui-deployment` | **Phase 4: Streamlit UI & Orchestration** | Interactive user interface, end-to-end evaluation runner |
+| **Member 3 (@irfanbasha11012007-max)** | `feature/answer-engine` | **Phase 3: Answer Engine + Grounding + Abstention** | `src/answer_engine.py`, `tests/test_answer_engine.py`, `docs/answer_engine.md` |
+| **Member 4** | `feature/ui-eval` | **Phase 4: Streamlit UI & Orchestration** | Interactive user interface, end-to-end evaluation runner |
 
 ---
 
@@ -37,6 +37,19 @@ Knowledge Assistant is an enterprise-grade AI knowledge retrieval and question-a
 
 ---
 
+## Phase 3 Implementation Summary (Member 3: @irfanbasha11012007-max)
+- **Answer Engine Core**: `AnswerEngine` orchestrating grounded generation from retrieved context.
+- **Anti-Hallucination Guardrails**: Strict policy where the model **NEVER guesses**. If context is insufficient or confidence < 0.20, returns:
+  > `"I don't have that information in the provided material."`
+- **Context Sufficiency Verifier**: Validates keyword topical overlap before generation.
+- **Citation Provenance Model**: `Citation` dataclass extracting inline tags e.g. `[Source 1: guide.md | Section: Setup | Page: 1]`.
+- **Resilient LLM Client**: `LLMClient` supporting OpenRouter / OpenAI with deterministic temperature 0.0, strict timeouts, and exponential backoff retry.
+- **Deterministic Offline Synthesizer**: Extractive fallback for offline testing or network disruptions.
+- **Prompt Injection Defense**: Sanitization and neutralization of adversarial instructions and delimiter overrides.
+- **Test Suite**: 13 unit and integration tests in `tests/test_answer_engine.py` (49 tests passing repository-wide).
+
+---
+
 ## Quick Start
 
 ### Installation
@@ -51,6 +64,11 @@ python -m src.ingest --input data/raw --output data/processed/chunks.jsonl --sta
 
 # 2. Build persistent vector store index
 python -m src.embed_store --input data/processed/chunks.jsonl --output data/index --model tfidf
+```
+
+### Asking Questions
+```bash
+python -m src.answer_engine "What is the system architecture?"
 ```
 
 ### Running Tests
