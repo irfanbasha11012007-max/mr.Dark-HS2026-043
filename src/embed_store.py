@@ -12,6 +12,7 @@ import json
 import logging
 import pickle
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -353,16 +354,7 @@ class VectorStore:
         top_k: int = 5,
         min_score: float = 0.0,
     ) -> List[Tuple[DocumentChunk, float]]:
-        """Perform cosine similarity search against stored document vectors.
-
-        Args:
-            query: Query string or pre-computed 1D vector.
-            top_k: Number of top results to return.
-            min_score: Minimum similarity score threshold.
-
-        Returns:
-            List of (DocumentChunk, similarity_score) tuples, ordered descending by score.
-        """
+        """Perform cosine similarity search against stored document vectors."""
         if self.embeddings is None or len(self.chunks) == 0:
             return []
 
@@ -374,18 +366,13 @@ class VectorStore:
         if self.normalize_embeddings:
             query_vec = normalize_vector(query_vec)
 
-        # Dot product with pre-normalized vectors gives exact cosine similarity
         scores = np.dot(self.embeddings, query_vec)
-
-        # Filter out NaN or invalid values
         scores = np.nan_to_num(scores, nan=0.0)
 
-        # Rank indices
         k = min(top_k, len(scores))
         if k <= 0:
             return []
 
-        # Sort indices descending
         sorted_indices = np.argsort(scores)[::-1][:k]
 
         results: List[Tuple[DocumentChunk, float]] = []
@@ -395,3 +382,39 @@ class VectorStore:
                 results.append((self.chunks[idx], score))
 
         return results
+
+    def save(self, directory: Union[str, Path]) -> None:
+        """Persist vector store index, chunks, and embeddings to disk.
+
+        Args:
+            directory: Target directory to save artifacts.
+        """
+        dir_path = Path(directory).resolve()
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save embeddings array
+        if self.embeddings is not None:
+            np.savez_compressed(dir_path / "embeddings.npz", embeddings=self.embeddings)
+
+        # 2. Save document chunks
+        chunks_data = [chunk.to_dict() for chunk in self.chunks]
+        with open(dir_path / "chunks.json", "w", encoding="utf-8") as f:
+            json.dump(chunks_data, f, ensure_ascii=False, indent=2)
+
+        # 3. Save index configuration metadata
+        config_data = {
+            "total_chunks": self.total_chunks,
+            "dimension": self.dimension,
+            "normalize_embeddings": self.normalize_embeddings,
+            "model_name": self.embedding_model.model_name,
+            "model_class": self.embedding_model.__class__.__name__,
+            "saved_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        with open(dir_path / "config.json", "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+
+        # 4. Save embedding model state if supported
+        if hasattr(self.embedding_model, "save"):
+            self.embedding_model.save(dir_path / "model.pkl")
+
+        logger.info("Successfully persisted VectorStore to %s", dir_path)
