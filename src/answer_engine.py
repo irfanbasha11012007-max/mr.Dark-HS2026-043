@@ -616,7 +616,7 @@ def main() -> None:
     """CLI Entry point for Knowledge Assistant Answer Engine."""
     parser = argparse.ArgumentParser(description="Query Knowledge Assistant Answer Engine")
     parser.add_argument("query", nargs="?", help="Question to ask")
-    parser.add_argument("--vector-store", default="data/vector_store.json", help="Path to vector store index")
+    parser.add_argument("--vector-store", default="data/index", help="Path to vector store index")
     parser.add_argument("--model", default="openai/gpt-4o-mini", help="Model name for generation")
     parser.add_argument("--offline", action="store_true", help="Force offline grounded synthesizer")
     args = parser.parse_args()
@@ -631,7 +631,11 @@ def main() -> None:
 
     engine = AnswerEngine(retriever=retriever, model_name=args.model, offline_mode=args.offline)
     response = engine.generate_answer(query)
-    print(response.to_json(indent=2))
+    
+    # Configure stdout to handle UTF-8 safely on Windows consoles
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdout.write(response.to_json(indent=2) + "\n")
 
 
 if __name__ == "__main__":

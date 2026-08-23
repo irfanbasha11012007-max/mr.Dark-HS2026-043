@@ -122,7 +122,11 @@ class RetrievalResult:
 def tokenize_query(query: str) -> List[str]:
     """Tokenize and filter search terms into alphanumeric tokens."""
     tokens = re.findall(r"\b\w+\b", query.lower())
-    stop_words = {"a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "it"}
+    stop_words = {
+        "a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "it",
+        "what", "how", "who", "where", "why", "when", "which", "do", "does", "did", "can",
+        "could", "would", "should", "will", "shall", "about"
+    }
     filtered = [t for t in tokens if t not in stop_words and len(t) > 1]
     return filtered or tokens
 
