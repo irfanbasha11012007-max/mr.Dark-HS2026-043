@@ -259,10 +259,17 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     st.title("🤖 AI Knowledge Assistant")
     st.caption("Phase 4 Grounded Generation & Verification System")
 
-    # Render current chat messages (placeholder render)
+    # Render current chat messages
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
+
+    # User input chat box
+    if user_input := st.chat_input("Ask a grounded question..."):
+        # Append and display user message
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.write(user_input)
 
 
 def main() -> None:
