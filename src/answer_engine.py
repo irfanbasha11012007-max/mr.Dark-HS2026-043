@@ -85,6 +85,58 @@ class Citation:
         return f"[{idx_str}{Path(self.source).name}{section_str}{page_str}]"
 
 
+@dataclass
+class AnswerResponse:
+    """Complete structured response from the Answer Engine."""
+
+    question: str
+    answer: str
+    citations: List[Citation] = field(default_factory=list)
+    abstained: bool = False
+    abstention_reason: Optional[str] = None
+    retrieval_confidence: float = 0.0
+    latency_ms: float = 0.0
+    tokens_used: int = 0
+    model_name: str = "openai/gpt-4o-mini"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize response to dictionary."""
+        return {
+            "question": self.question,
+            "answer": self.answer,
+            "citations": [c.to_dict() for c in self.citations],
+            "abstained": self.abstained,
+            "abstention_reason": self.abstention_reason,
+            "retrieval_confidence": round(self.retrieval_confidence, 4),
+            "latency_ms": round(self.latency_ms, 2),
+            "tokens_used": self.tokens_used,
+            "model_name": self.model_name,
+            "metadata": self.metadata,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        """Serialize response to formatted JSON string."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AnswerResponse":
+        """Deserialize response from dictionary."""
+        citations = [Citation.from_dict(c) for c in data.get("citations", [])]
+        return cls(
+            question=data["question"],
+            answer=data["answer"],
+            citations=citations,
+            abstained=data.get("abstained", False),
+            abstention_reason=data.get("abstention_reason"),
+            retrieval_confidence=data.get("retrieval_confidence", 0.0),
+            latency_ms=data.get("latency_ms", 0.0),
+            tokens_used=data.get("tokens_used", 0),
+            model_name=data.get("model_name", "openai/gpt-4o-mini"),
+            metadata=data.get("metadata", {}),
+        )
+
+
 def build_user_prompt(question: str, context_block: str) -> str:
     """Construct the final grounded user prompt pairing retrieved context with the question."""
     return (
@@ -118,19 +170,26 @@ class AnswerEngine:
         self,
         question: str,
         retrieval_result: Optional[RetrievalResult] = None,
-    ) -> Dict[str, Any]:
+    ) -> AnswerResponse:
         """Generate a grounded answer for a question."""
+        start_time = time.perf_counter()
         clean_q = question.strip()
+
         if not clean_q:
-            return {
-                "question": question,
-                "answer": STANDARD_ABSTENTION_MESSAGE,
-                "abstained": True,
-                "abstention_reason": "Empty question provided",
-            }
-        return {
-            "question": clean_q,
-            "answer": STANDARD_ABSTENTION_MESSAGE,
-            "abstained": True,
-            "abstention_reason": "Initial skeleton",
-        }
+            return AnswerResponse(
+                question=question,
+                answer=STANDARD_ABSTENTION_MESSAGE,
+                abstained=True,
+                abstention_reason="Empty question provided",
+                latency_ms=(time.perf_counter() - start_time) * 1000,
+                model_name=self.model_name,
+            )
+
+        return AnswerResponse(
+            question=clean_q,
+            answer=STANDARD_ABSTENTION_MESSAGE,
+            abstained=True,
+            abstention_reason="Initial skeleton",
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+            model_name=self.model_name,
+        )
