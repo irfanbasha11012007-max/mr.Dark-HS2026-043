@@ -4,6 +4,21 @@ Knowledge Assistant is an enterprise-grade AI knowledge retrieval and question-a
 
 ---
 
+## System Architecture
+
+```mermaid
+graph TD
+    A[Raw Documents: TXT, MD, PDF] --> B[Phase 1: Ingestion & Text Cleaning]
+    B --> C[Processed JSONL Chunks]
+    C --> D[Phase 2: Hybrid Retrieval Indexing]
+    D --> E[VectorStore: Dense, TF-IDF, Prefix]
+    E --> F[Phase 3: Answer Engine & Refusal Gating]
+    F --> G[Grounded Answer / Strict Abstention Refusal]
+    G --> H[Phase 4: Streamlit & CLI Chat Interface]
+```
+
+---
+
 ## Team Responsibilities & Ownership
 
 | Member | Branch | Assigned Phase | Ownership |
@@ -11,7 +26,7 @@ Knowledge Assistant is an enterprise-grade AI knowledge retrieval and question-a
 | **Member 1 (@harivarman-007)** | `feature/ingest-eval` | **Phase 1: Document Ingestion + Evaluation** | `src/config.py`, `src/ingest.py`, `tests/test_ingest.py`, `evaluation/eval_questions.jsonl`, `docs/ingestion.md` |
 | **Member 2 (@mrdark5133)** | `feature/retriever` | **Phase 2: Embeddings & Hybrid Retrieval** | `src/embed_store.py`, `src/retriever.py`, `tests/test_retriever.py`, `docs/retrieval.md` |
 | **Member 3 (@irfanbasha11012007-max)** | `feature/answer-engine` | **Phase 3: Answer Engine + Grounding + Abstention** | `src/answer_engine.py`, `tests/test_answer_engine.py`, `docs/answer_engine.md` |
-| **Member 4** | `feature/ui-eval` | **Phase 4: Streamlit UI & Orchestration** | Interactive user interface, end-to-end evaluation runner |
+| **Member 4 (@haygen04)** | `feature/chat-ui` | **Phase 4: Chat UI + Integration + Evaluation** | `src/chat_app.py`, `evaluation/run_eval.py`, `tests/test_integration.py`, `docs/demo_walkthrough.md` |
 
 ---
 
@@ -50,11 +65,23 @@ Knowledge Assistant is an enterprise-grade AI knowledge retrieval and question-a
 
 ---
 
+## Phase 4 Implementation Summary (Member 4: @haygen04)
+- **Unified CLI Entrypoint**: Interactive terminal chat loop with `rich` console panels, metadata grid, and citation table layouts (`python -m src.chat_app --mode cli`).
+- **Interactive Streamlit Web Playground**: Premium glassmorphic dark theme and Outfit typography custom CSS.
+- **Visual Refusal Alerts**: Explicit color border panels separating Grounded Answers (green) from Refusals/Abstentions (red).
+- **Interactive Threshold Tuning**: Real-time slider controlling retrieval confidence gating limits.
+- **Knowledge Base Inspector**: Tab-based diagnostic page showing chunk dataframe and sandbox retriever query testbeds.
+- **Dynamic Index Rebuilder**: Sidebar button to rebuild ingestion and vector indexing pipeline automatically.
+- **Benchmark Evaluation Runner**: Evaluates coverage and calculates Refusal Precision, Recall, and F1 scores against gold standard dataset.
+- **Test Suite**: Multi-phase end-to-end integration tests (`tests/test_integration.py`). All 50 tests pass repository-wide.
+
+---
+
 ## Quick Start
 
 ### Installation
 ```bash
-python -m pip install pytest pypdf scikit-learn numpy
+python -m pip install pytest pypdf scikit-learn numpy streamlit rich
 ```
 
 ### Running Ingestion & Indexing
@@ -66,9 +93,18 @@ python -m src.ingest --input data/raw --output data/processed/chunks.jsonl --sta
 python -m src.embed_store --input data/processed/chunks.jsonl --output data/index --model tfidf
 ```
 
-### Asking Questions
+### Launching the Application
 ```bash
-python -m src.answer_engine "What is the system architecture?"
+# Streamlit Web UI Mode
+streamlit run src/chat_app.py --mode streamlit
+
+# Terminal CLI Mode
+python -m src.chat_app --mode cli
+```
+
+### Running Benchmark Evaluations
+```bash
+python -m evaluation.run_eval --dataset evaluation/eval_questions.jsonl --output evaluation/report.json
 ```
 
 ### Running Tests
