@@ -448,13 +448,11 @@ class RecursiveCharacterChunker:
         if chosen_separator:
             splits = text.split(chosen_separator)
         else:
-            # Character by character fallback
             splits = list(text)
 
         good_splits: List[str] = []
         for s in splits:
             if chosen_separator and chosen_separator.strip():
-                # Re-attach separator context if meaningful
                 segment = s if not good_splits else (chosen_separator + s if not s.startswith(chosen_separator) else s)
             else:
                 segment = s
@@ -466,14 +464,27 @@ class RecursiveCharacterChunker:
                     other_splits = self._split_text_recursive(segment, new_separators)
                     good_splits.extend(other_splits)
                 else:
-                    # Hard character slicing fallback if no separators remain
                     for j in range(0, len(segment), self.chunk_size):
                         good_splits.append(segment[j:j + self.chunk_size])
 
         return good_splits
 
+    def _extract_overlap_prefix(self, previous_chunk: str) -> str:
+        """Extract a natural trailing slice from previous chunk to use as overlap."""
+        if not previous_chunk or self.chunk_overlap <= 0:
+            return ""
+
+        overlap_slice = previous_chunk[-self.chunk_overlap:]
+        # Find earliest natural boundary in the overlap slice to avoid chopped words
+        for delimiter in ("\n\n", "\n", ". ", "? ", "! ", " "):
+            idx = overlap_slice.find(delimiter)
+            if idx != -1 and idx + len(delimiter) < len(overlap_slice):
+                return overlap_slice[idx + len(delimiter):]
+
+        return overlap_slice
+
     def split_text(self, text: str) -> List[str]:
-        """Split text into chunks without overlap (base recursive split)."""
+        """Split text into chunks with recursive boundary splitting and chunk overlap."""
         if not text or not text.strip():
             return []
 
@@ -507,4 +518,23 @@ class RecursiveCharacterChunker:
             if len(merged) >= self.min_chunk_length or not merged_chunks:
                 merged_chunks.append(merged)
 
-        return merged_chunks
+        # Apply overlap across consecutive chunks
+        if self.chunk_overlap <= 0 or len(merged_chunks) <= 1:
+            return merged_chunks
+
+        overlapped_chunks: List[str] = [merged_chunks[0]]
+        for i in range(1, len(merged_chunks)):
+            prev_chunk = merged_chunks[i - 1]
+            curr_chunk = merged_chunks[i]
+            prefix = self._extract_overlap_prefix(prev_chunk)
+            if prefix and not curr_chunk.startswith(prefix):
+                combined = (prefix + " " + curr_chunk).strip()
+                # Ensure combined does not excessively exceed chunk_size + overlap
+                if len(combined) <= self.chunk_size + self.chunk_overlap:
+                    overlapped_chunks.append(combined)
+                else:
+                    overlapped_chunks.append(curr_chunk)
+            else:
+                overlapped_chunks.append(curr_chunk)
+
+        return overlapped_chunks
