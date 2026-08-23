@@ -18,7 +18,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.answer_engine import AnswerEngine, AnswerResponse
-from src.embed_store import VectorStore
+from src.embed_store import VectorStore, build_vector_store_from_jsonl
+from src.ingest import IngestionPipeline
+from src.config import default_config
 from src.retriever import HybridRetriever
 
 logger = logging.getLogger(__name__)
@@ -36,8 +38,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--vector-store",
-        default="data/vector_store.json",
-        help="Path to persistent vector store JSON file",
+        default="data/index",
+        help="Path to persistent vector store index directory",
     )
     parser.add_argument(
         "--model",
@@ -118,7 +120,7 @@ def init_engine(args: argparse.Namespace) -> AnswerEngine:
     """Initialize Retriever and AnswerEngine."""
     vs_path = Path(args.vector_store)
     retriever = None
-    if vs_path.exists():
+    if vs_path.exists() and vs_path.is_dir():
         try:
             vstore = VectorStore.load(vs_path)
             retriever = HybridRetriever(vector_store=vstore)
@@ -131,6 +133,47 @@ def init_engine(args: argparse.Namespace) -> AnswerEngine:
         min_confidence_threshold=args.threshold,
         offline_mode=args.offline,
     )
+
+
+def rebuild_index_pipeline(vector_store_dir: str) -> str:
+    """End-to-end rebuild index: loader -> ingestion -> embedding vector store."""
+    raw_dir = Path("data/raw")
+    processed_dir = Path("data/processed")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a default technical guide if raw directory is completely empty
+    guide_path = raw_dir / "guide.md"
+    if not any(raw_dir.iterdir()):
+        guide_content = """# Knowledge Assistant Guide
+
+The Knowledge Assistant is an enterprise-grade AI question answering system.
+It utilizes a multi-channel hybrid retriever fusing dense embeddings, keywords (TF-IDF), and prefix matching.
+
+## Architecture
+
+The system consists of 4 distinct phases:
+1. Document Ingestion: processes TXT, MD, and PDF documents.
+2. Vector Indexing: builds dense and sparse representations.
+3. Hybrid Retrieval: searches for relevant context.
+4. Grounded Generation: generates answers strictly from context.
+"""
+        guide_path.write_text(guide_content, encoding="utf-8")
+
+    chunks_jsonl = processed_dir / "chunks.jsonl"
+    
+    # 1. Ingest
+    pipeline = IngestionPipeline(default_config)
+    stats = pipeline.run(str(raw_dir), str(chunks_jsonl))
+
+    # 2. Vector Store Index
+    build_vector_store_from_jsonl(
+        jsonl_path=str(chunks_jsonl),
+        output_dir=vector_store_dir,
+        model_type="tfidf",
+    )
+
+    return f"Indexed {stats.get('total_chunks', 0)} chunks successfully!"
 
 
 def run_terminal_chat(args: argparse.Namespace) -> None:
@@ -339,6 +382,12 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     st.session_state.threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, value=st.session_state.threshold, step=0.05)
     st.sidebar.caption("💡 Higher values reject more out-of-scope queries.")
     st.session_state.offline = st.sidebar.checkbox("Force Offline Mode", value=st.session_state.offline)
+
+    # Rebuild index action button
+    if st.sidebar.button("⚙️ Rebuild Knowledge Index"):
+        with st.sidebar.spinner("Rebuilding index..."):
+            msg = rebuild_index_pipeline(args.vector_store)
+            st.sidebar.success(msg)
 
     # Render main tabs
     tab_chat, tab_inspector = st.tabs(["💬 Chat Playground", "🔍 Knowledge Base Inspector"])
