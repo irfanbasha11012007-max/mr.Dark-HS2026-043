@@ -114,6 +114,45 @@ def calculate_factual_accuracy(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def calculate_abstention_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Calculate precision, recall, and F1 metrics for abstentions/refusals."""
+    tp = 0  # Out-of-scope query correctly abstained
+    fp = 0  # In-scope query incorrectly abstained
+    fn = 0  # Out-of-scope query incorrectly answered (failure to abstain)
+    tn = 0  # In-scope query correctly answered
+
+    for r in results:
+        is_in_scope = r["is_in_scope"]
+        abstained = r["abstained"]
+
+        if not is_in_scope:
+            if abstained:
+                tp += 1
+            else:
+                fn += 1
+        else:
+            if abstained:
+                fp += 1
+            else:
+                tn += 1
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+    rejection_rate = sum(1 for r in results if r["abstained"]) / len(results) if results else 0.0
+
+    return {
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "true_negatives": tn,
+        "abstention_precision": precision,
+        "abstention_recall": recall,
+        "abstention_f1": f1,
+        "rejection_rate": rejection_rate,
+    }
+
+
 def run_evaluation(args: argparse.Namespace) -> Dict[str, Any]:
     """Execute evaluation queries and collect raw outputs."""
     dataset_path = Path(args.dataset)
@@ -161,6 +200,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, Any]:
         })
 
     accuracy_metrics = calculate_factual_accuracy(results)
+    abstention_metrics = calculate_abstention_metrics(results)
 
     report = {
         "metadata": {
@@ -171,6 +211,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, Any]:
             "total_questions": len(records),
         },
         "accuracy_metrics": accuracy_metrics,
+        "abstention_metrics": abstention_metrics,
         "results": results,
     }
     return report
@@ -188,6 +229,9 @@ def main() -> None:
 
     logger.info("Evaluation report saved to %s", output_path)
     logger.info("Factual Accuracy (Entity Coverage Score): %.2f%%", report["accuracy_metrics"]["accuracy"] * 100)
+    logger.info("Abstention Refusal Precision: %.2f%%", report["abstention_metrics"]["abstention_precision"] * 100)
+    logger.info("Abstention Refusal Recall: %.2f%%", report["abstention_metrics"]["abstention_recall"] * 100)
+    logger.info("Abstention Refusal F1 Score: %.2f%%", report["abstention_metrics"]["abstention_f1"] * 100)
 
 
 if __name__ == "__main__":
