@@ -28,6 +28,19 @@ logger = logging.getLogger(__name__)
 # Standard exact refusal string required when retrieved context is insufficient
 STANDARD_ABSTENTION_MESSAGE = "I don't have that information in the provided material."
 
+# Regex patterns indicating that the model or context refused to answer
+ABSTENTION_PATTERNS = [
+    r"i don't have that information",
+    r"i do not have that information",
+    r"not mentioned in the (provided|given)?\s*context",
+    r"not provided in the (provided|given)?\s*material",
+    r"cannot answer (this|from the provided)",
+    r"information is not available",
+    r"insufficient context",
+    r"no information provided",
+    r"i cannot find",
+]
+
 STRICT_SYSTEM_PROMPT = """You are a strictly grounded AI Knowledge Assistant.
 Your core principle is: YOU MUST NEVER GUESS OR USE OUTSIDE WORLD KNOWLEDGE.
 
@@ -274,6 +287,24 @@ def verify_context_sufficiency(
         )
 
     return True, None
+
+
+def normalize_abstention_response(raw_text: str) -> Tuple[str, bool]:
+    """Check if the generated text is an abstention and normalize to the exact standard string.
+
+    Returns:
+        (final_text, is_abstained)
+    """
+    cleaned = raw_text.strip()
+    if not cleaned:
+        return STANDARD_ABSTENTION_MESSAGE, True
+
+    lower = cleaned.lower()
+    for pattern in ABSTENTION_PATTERNS:
+        if re.search(pattern, lower):
+            return STANDARD_ABSTENTION_MESSAGE, True
+
+    return cleaned, False
 
 
 def build_user_prompt(question: str, context_block: str) -> str:
