@@ -408,11 +408,11 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     # Top level actions
     col_chat, col_exit = st.sidebar.columns(2)
     with col_chat:
-        if st.button("New Chat", key="btn_new_chat", use_container_width=True):
+        if st.button("New Chat", key="btn_new_chat", width="stretch"):
             st.session_state.messages = []
             st.rerun()
     with col_exit:
-        if st.button("Exit", key="btn_exit", use_container_width=True):
+        if st.button("Exit", key="btn_exit", width="stretch"):
             st.sidebar.info("Stopping application...")
             import os
             import time
@@ -428,7 +428,7 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
         st.caption("Higher values reject more out-of-scope queries.")
         st.session_state.offline = st.checkbox("Force Offline Mode", value=st.session_state.offline)
 
-        if st.button("Rebuild Index", use_container_width=True):
+        if st.button("Rebuild Index", width="stretch"):
             with st.spinner("Rebuilding..."):
                 msg = rebuild_index_pipeline(args.vector_store)
                 st.success(msg)
@@ -460,7 +460,7 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
                             "Section": c.section_header or "N/A",
                             "Snippet": c.text[:80] + "..." if len(c.text) > 80 else c.text,
                         })
-                    st.dataframe(chunk_data, use_container_width=True)
+                    st.dataframe(chunk_data, width="stretch")
             except Exception as e:
                 st.error(f"Error loading: {e}")
         else:
@@ -486,7 +486,7 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
         for idx, card in enumerate(SAMPLE_CARDS):
             col_idx = idx % 2
             with cols[col_idx]:
-                if st.button(f"{card['label']}\n\n→ {card['query']}", key=f"card_{idx}", use_container_width=True):
+                if st.button(f"{card['label']}\n\n→ {card['query']}", key=f"card_{idx}", width="stretch"):
                     selected_sample = card['query']
 
         st.markdown("<div style='height: 40px;'></div>", unsafe_allow_html=True)
