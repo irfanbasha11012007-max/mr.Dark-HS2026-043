@@ -42,6 +42,15 @@ ABSTENTION_PATTERNS = [
     r"i cannot find",
 ]
 
+# Patterns for prompt injection sanitization
+INJECTION_OVERRIDE_PATTERNS = [
+    r"(?i)ignore\s+(all\s+)?(previous|prior)\s+(instructions|prompts|rules)",
+    r"(?i)disregard\s+(all\s+)?(previous|prior)\s+(instructions|prompts|rules)",
+    r"(?i)you\s+are\s+now\s+(a|an|in)\s+(unrestricted|jailbreak|developer|god)\s+mode",
+    r"(?i)system\s+override",
+    r"(?i)system\s+prompt\s*:",
+]
+
 STRICT_SYSTEM_PROMPT = """You are a strictly grounded AI Knowledge Assistant.
 Your core principle is: YOU MUST NEVER GUESS OR USE OUTSIDE WORLD KNOWLEDGE.
 
@@ -242,7 +251,6 @@ class LLMClient:
                 }
 
             except urllib.error.HTTPError as e:
-                # Non-retryable client errors (except 429 Too Many Requests)
                 if e.code in (400, 401, 403, 404):
                     logger.error("Non-retryable HTTP error %d: %s", e.code, e.reason)
                     raise
@@ -252,12 +260,23 @@ class LLMClient:
                 last_exception = e
                 logger.warning("Network/Timeout error on attempt %d/%d: %s", attempt + 1, cfg.max_retries, e)
 
-            # Exponential backoff sleep before next retry attempt
             if attempt < cfg.max_retries - 1:
                 sleep_sec = (cfg.retry_backoff_factor ** attempt) * 0.5
                 time.sleep(sleep_sec)
 
         raise RuntimeError(f"All {cfg.max_retries} LLM API attempts failed") from last_exception
+
+
+def sanitize_prompt_input(text: str) -> str:
+    """Sanitize prompt input against injection attempts and control delimiters."""
+    sanitized = text.replace("=== SYSTEM ===", "[DELIMITER]")
+    sanitized = sanitized.replace("=== USER QUESTION ===", "[QUESTION]")
+    sanitized = sanitized.replace("=== GROUNDED ANSWER ===", "[ANSWER]")
+
+    for pattern in INJECTION_OVERRIDE_PATTERNS:
+        sanitized = re.sub(pattern, "[FILTERED_OVERRIDE_ATTEMPT]", sanitized)
+
+    return sanitized.strip()
 
 
 def evaluate_confidence_abstention(
@@ -336,7 +355,6 @@ def parse_and_bind_citations(
     citations: List[Citation] = []
     seen_chunk_ids = set()
 
-    # Find [Source X], [Doc X], [Document X] patterns
     source_matches = re.findall(r"\[(?:Source|Doc|Document)\s*(\d+)[^\]]*\]", raw_response_text, re.IGNORECASE)
     for match in source_matches:
         try:
@@ -440,11 +458,13 @@ def generate_offline_grounded_answer(
 
 def build_user_prompt(question: str, context_block: str) -> str:
     """Construct the final grounded user prompt pairing retrieved context with the question."""
+    safe_q = sanitize_prompt_input(question)
+    safe_ctx = sanitize_prompt_input(context_block)
     return (
         f"=== RETRIEVED CONTEXT DOCUMENTS ===\n"
-        f"{context_block.strip() if context_block.strip() else '[No relevant documents found]'}\n\n"
+        f"{safe_ctx.strip() if safe_ctx.strip() else '[No relevant documents found]'}\n\n"
         f"=== USER QUESTION ===\n"
-        f"{question.strip()}\n\n"
+        f"{safe_q.strip()}\n\n"
         f"=== GROUNDED ANSWER ==="
     )
 
@@ -482,7 +502,7 @@ class AnswerEngine:
     ) -> AnswerResponse:
         """Generate a grounded answer for a question with strict confidence & sufficiency gating."""
         start_time = time.perf_counter()
-        clean_q = question.strip()
+        clean_q = sanitize_prompt_input(question)
 
         if not clean_q:
             return AnswerResponse(
@@ -494,7 +514,6 @@ class AnswerEngine:
                 model_name=self.model_name,
             )
 
-        # Retrieve context if not provided
         r_result = retrieval_result
         if r_result is None and self.retriever is not None:
             r_result = self.retriever.retrieve(clean_q)
