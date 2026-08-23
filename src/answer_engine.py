@@ -40,6 +40,51 @@ Do NOT explain what is missing, do NOT apologize, do NOT provide partial guesses
 """
 
 
+@dataclass
+class Citation:
+    """Represents an exact source provenance citation for a grounded answer."""
+
+    source: str
+    section: Optional[str] = None
+    page: Optional[int] = None
+    snippet: str = ""
+    confidence: float = 0.0
+    doc_id: str = ""
+    chunk_id: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize citation to dictionary."""
+        return {
+            "source": self.source,
+            "section": self.section,
+            "page": self.page,
+            "snippet": self.snippet,
+            "confidence": round(self.confidence, 4),
+            "doc_id": self.doc_id,
+            "chunk_id": self.chunk_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Citation":
+        """Deserialize citation from dictionary."""
+        return cls(
+            source=data.get("source", "Unknown"),
+            section=data.get("section"),
+            page=data.get("page"),
+            snippet=data.get("snippet", ""),
+            confidence=data.get("confidence", 0.0),
+            doc_id=data.get("doc_id", ""),
+            chunk_id=data.get("chunk_id", ""),
+        )
+
+    def format_citation_tag(self, index: Optional[int] = None) -> str:
+        """Format human-readable citation label."""
+        idx_str = f"Source {index}: " if index is not None else ""
+        section_str = f" | Section: {self.section}" if self.section else ""
+        page_str = f" | Page: {self.page}" if self.page is not None else ""
+        return f"[{idx_str}{Path(self.source).name}{section_str}{page_str}]"
+
+
 def build_user_prompt(question: str, context_block: str) -> str:
     """Construct the final grounded user prompt pairing retrieved context with the question."""
     return (
