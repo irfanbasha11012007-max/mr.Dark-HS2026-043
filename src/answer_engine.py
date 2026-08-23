@@ -225,6 +225,33 @@ class LLMClient:
         }
 
 
+def evaluate_confidence_abstention(
+    retrieval_result: Optional[RetrievalResult],
+    min_confidence: float,
+) -> Tuple[bool, Optional[str]]:
+    """Determine whether to abstain from answering based on retrieval confidence.
+
+    Returns:
+        (should_abstain, reason)
+    """
+    if retrieval_result is None or not retrieval_result.hits:
+        return True, "No relevant documents found in knowledge base"
+
+    if retrieval_result.top_confidence < min_confidence:
+        return (
+            True,
+            f"Retrieval confidence ({retrieval_result.top_confidence:.3f}) below threshold ({min_confidence:.3f})",
+        )
+
+    if not retrieval_result.is_confident:
+        return (
+            True,
+            retrieval_result.rejection_reason or "Retriever flagged query as unconfident",
+        )
+
+    return False, None
+
+
 def build_user_prompt(question: str, context_block: str) -> str:
     """Construct the final grounded user prompt pairing retrieved context with the question."""
     return (
@@ -264,7 +291,7 @@ class AnswerEngine:
         question: str,
         retrieval_result: Optional[RetrievalResult] = None,
     ) -> AnswerResponse:
-        """Generate a grounded answer for a question."""
+        """Generate a grounded answer for a question with strict confidence gating."""
         start_time = time.perf_counter()
         clean_q = question.strip()
 
@@ -278,11 +305,32 @@ class AnswerEngine:
                 model_name=self.model_name,
             )
 
+        # Retrieve context if not provided
+        r_result = retrieval_result
+        if r_result is None and self.retriever is not None:
+            r_result = self.retriever.retrieve(clean_q)
+
+        # 1. Evaluate confidence-based abstention
+        should_abstain, reason = evaluate_confidence_abstention(r_result, self.min_confidence_threshold)
+        top_conf = r_result.top_confidence if r_result else 0.0
+
+        if should_abstain:
+            return AnswerResponse(
+                question=clean_q,
+                answer=STANDARD_ABSTENTION_MESSAGE,
+                abstained=True,
+                abstention_reason=reason,
+                retrieval_confidence=top_conf,
+                latency_ms=(time.perf_counter() - start_time) * 1000,
+                model_name=self.model_name,
+            )
+
         return AnswerResponse(
             question=clean_q,
             answer=STANDARD_ABSTENTION_MESSAGE,
             abstained=True,
-            abstention_reason="Initial skeleton",
+            abstention_reason="Pending generation step",
+            retrieval_confidence=top_conf,
             latency_ms=(time.perf_counter() - start_time) * 1000,
             model_name=self.model_name,
         )
