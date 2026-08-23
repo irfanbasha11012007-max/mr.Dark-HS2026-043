@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,18 +129,7 @@ def generate_doc_id(file_path: Union[str, Path], content: Optional[str] = None) 
 
 
 def load_text_document(file_path: Union[str, Path]) -> Document:
-    """Load a plain text document with multi-encoding fallback support.
-
-    Args:
-        file_path: Path to the plain text file.
-
-    Returns:
-        Document instance containing content and file metadata.
-
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: If the path is not a file or cannot be decoded.
-    """
+    """Load a plain text document with multi-encoding fallback support."""
     path = Path(file_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -179,5 +169,86 @@ def load_text_document(file_path: Union[str, Path]) -> Document:
         content=content,
         source=str(path.as_posix()),
         doc_type="text",
+        metadata=metadata,
+    )
+
+
+def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
+    """Parse optional YAML/metadata frontmatter block at the top of markdown files.
+
+    Returns:
+        A tuple of (frontmatter_dict, remaining_body_text).
+    """
+    frontmatter: Dict[str, Any] = {}
+    if not text.startswith("---"):
+        return frontmatter, text
+
+    end_idx = text.find("\n---", 3)
+    if end_idx == -1:
+        return frontmatter, text
+
+    fm_raw = text[3:end_idx].strip()
+    body = text[end_idx + 4:].lstrip("\r\n")
+
+    for line in fm_raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        val = val.strip().strip("\"'")
+        # Convert simple types
+        if val.lower() == "true":
+            frontmatter[key] = True
+        elif val.lower() == "false":
+            frontmatter[key] = False
+        elif val.isdigit():
+            frontmatter[key] = int(val)
+        else:
+            frontmatter[key] = val
+
+    return frontmatter, body
+
+
+def load_markdown_document(file_path: Union[str, Path], strip_frontmatter: bool = False) -> Document:
+    """Load a markdown document with frontmatter parsing and header extraction.
+
+    Args:
+        file_path: Path to the markdown file (.md, .markdown).
+        strip_frontmatter: If True, frontmatter block is removed from content and stored in metadata.
+
+    Returns:
+        Document instance with markdown-specific metadata.
+    """
+    raw_doc = load_text_document(file_path)
+    frontmatter, body = parse_frontmatter(raw_doc.content)
+
+    # Extract all markdown headers
+    headers = re.findall(r"^(#{1,6})\s+(.+)$", raw_doc.content, flags=re.MULTILINE)
+    detected_headers = [{"level": len(h[0]), "title": h[1].strip()} for h in headers]
+
+    # Extract title if present (first H1 or frontmatter title)
+    title = frontmatter.get("title")
+    if not title:
+        for h in detected_headers:
+            if h["level"] == 1:
+                title = h["title"]
+                break
+
+    metadata = dict(raw_doc.metadata)
+    metadata.update({
+        "frontmatter": frontmatter,
+        "headers": detected_headers,
+        "header_count": len(detected_headers),
+        "title": title or Path(file_path).stem,
+    })
+
+    content_to_use = body if strip_frontmatter and frontmatter else raw_doc.content
+
+    return Document(
+        doc_id=raw_doc.doc_id,
+        content=content_to_use,
+        source=raw_doc.source,
+        doc_type="markdown",
         metadata=metadata,
     )
