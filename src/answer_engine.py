@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -194,7 +195,7 @@ class LLMClient:
         model: Optional[str] = None,
         config_override: Optional[GenerationConfig] = None,
     ) -> Dict[str, Any]:
-        """Send chat completion request to the API."""
+        """Send chat completion request to the API with strict timeout enforcement."""
         if not self.is_available:
             raise ValueError("LLMClient is not configured with an API key")
 
@@ -222,8 +223,12 @@ class LLMClient:
         data_bytes = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(endpoint, data=data_bytes, headers=headers, method="POST")
 
-        with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as response:
-            res_body = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as response:
+                res_body = json.loads(response.read().decode("utf-8"))
+        except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
+            logger.error("LLM API request timed out after %.1fs: %s", cfg.timeout_seconds, e)
+            raise TimeoutError(f"LLM request timed out after {cfg.timeout_seconds}s") from e
 
         choice = res_body.get("choices", [{}])[0]
         content = choice.get("message", {}).get("content", "")
