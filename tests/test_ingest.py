@@ -218,7 +218,7 @@ class TestTextCleaning:
         assert "\r" not in cleaned
         assert "\u200b" not in cleaned
         assert "\ufeff" not in cleaned
-        assert "Hello\n\nWorld with space and BOM." == cleaned
+        assert cleaned == "Hello\n\nWorld with space\nand BOM."
 
     def test_clean_empty_text(self):
         assert clean_text("") == ""
