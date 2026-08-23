@@ -1,6 +1,6 @@
 # Task Tracking: Knowledge Assistant
 
-## Member 1 Tasks — Phase 1: Document Ingestion + Evaluation
+## Member 1 Tasks — Phase 1: Document Ingestion + Evaluation (@harivarman-007)
 - [x] Project configuration (`src/config.py`, `.env.example`, `.gitignore`)
 - [x] TXT document loader (`load_text_document`)
 - [x] Markdown document loader with frontmatter extraction (`load_markdown_document`)
@@ -17,7 +17,26 @@
 - [x] Evaluation questions dataset - out-of-scope & adversarial (`evaluation/eval_questions.jsonl`)
 - [x] Comprehensive documentation (`docs/ingestion.md`, `README.md`, `plan.md`, `task.md`)
 
+## Member 2 Tasks — Phase 2: Embeddings + Vector Store + Retrieval (@mrdark5133)
+- [x] Abstract embedding model interface (`BaseEmbeddingModel` in `src/embed_store.py`)
+- [x] Sublinear TF-IDF embedding model (`TfidfEmbeddingModel`)
+- [x] Local dense semantic embedding model (`LocalDenseEmbeddingModel`)
+- [x] VectorStore storage & L2 normalization (`VectorStore`)
+- [x] Fast cosine similarity search with argpartition top-k
+- [x] Persistent index serialization (`embeddings.npz`, `chunks.json`, `config.json`, `model.pkl`)
+- [x] Vector store loading and index restoration (`VectorStore.load`)
+- [x] Index builder & rebuilder CLI (`python -m src.embed_store`)
+- [x] Retrieval hit and result models (`RetrievalHit`, `RetrievalResult` in `src/retriever.py`)
+- [x] Hybrid retriever engine (`HybridRetriever`)
+- [x] Structured context formatter with provenance citation (`format_context`)
+- [x] Sparse keyword scoring & exact phrase bonus (`compute_keyword_score`)
+- [x] Morphological prefix and stem matching (`compute_prefix_score`)
+- [x] Calibrated confidence scoring (`calibrate_confidence`)
+- [x] Threshold gating and out-of-scope rejection
+- [x] Accelerated batch similarity search (`batch_similarity_search`)
+- [x] Comprehensive unit and integration test suite (`tests/test_retriever.py`)
+- [x] Retrieval architecture and pipeline documentation (`docs/retrieval.md`)
+
 ## Next Phases (Other Members)
-- [ ] Phase 2: Embeddings & Vector Indexing (Member 2)
 - [ ] Phase 3: LLM Generation & Grounding (Member 3)
 - [ ] Phase 4: Streamlit UI & Evaluation Execution (Member 4)
