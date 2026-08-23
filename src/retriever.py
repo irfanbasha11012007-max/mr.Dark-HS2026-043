@@ -116,21 +116,21 @@ class RetrievalResult:
         )
 
 
+def tokenize_query(query: str) -> List[str]:
+    """Tokenize and filter search terms into alphanumeric tokens."""
+    tokens = re.findall(r"\b\w+\b", query.lower())
+    # Filter common trivial stop words while preserving domain keywords
+    stop_words = {"a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "it"}
+    filtered = [t for t in tokens if t not in stop_words and len(t) > 1]
+    return filtered or tokens
+
+
 def format_context(
     hits: Sequence[RetrievalHit],
     max_characters: int = 4000,
     include_provenance: bool = True,
 ) -> str:
-    """Format a list of retrieval hits into a clean structured Markdown context block.
-
-    Args:
-        hits: Sequence of ranked RetrievalHit objects.
-        max_characters: Maximum length ceiling for the accumulated context string.
-        include_provenance: If True, includes source file, section, page, and score metadata.
-
-    Returns:
-        Structured Markdown context string ready for LLM prompt augmentation.
-    """
+    """Format a list of retrieval hits into a clean structured Markdown context block."""
     if not hits:
         return ""
 
@@ -151,9 +151,8 @@ def format_context(
         else:
             block = f"--- Document {idx} ---\n{chunk.text.strip()}"
 
-        block_len = len(block) + 2  # Account for double newline separator
+        block_len = len(block) + 2
         if current_char_count + block_len > max_characters and context_blocks:
-            # Reached budget ceiling, truncate gracefully
             break
 
         context_blocks.append(block)
@@ -183,22 +182,32 @@ class HybridRetriever:
         self.min_confidence = min_confidence
         self.max_context_chars = max_context_chars
 
+    def compute_keyword_score(self, query_tokens: Sequence[str], chunk_text: str, raw_query: str) -> float:
+        """Compute keyword frequency and phrase match score for a chunk."""
+        if not query_tokens:
+            return 0.0
+
+        lower_text = chunk_text.lower()
+        chunk_words = set(re.findall(r"\b\w+\b", lower_text))
+
+        # 1. Token coverage ratio
+        matched_tokens = sum(1 for t in query_tokens if t in chunk_words)
+        coverage_score = matched_tokens / len(query_tokens)
+
+        # 2. Exact phrase bonus
+        clean_raw = raw_query.lower().strip()
+        phrase_bonus = 0.2 if len(clean_raw) > 3 and clean_raw in lower_text else 0.0
+
+        score = min(1.0, coverage_score * 0.8 + phrase_bonus)
+        return float(score)
+
     def retrieve(
         self,
         query: str,
         top_k: Optional[int] = None,
         format_context_block: bool = True,
     ) -> RetrievalResult:
-        """Retrieve the top-k most relevant document chunks for a query.
-
-        Args:
-            query: User question or search text.
-            top_k: Optional override for number of hits.
-            format_context_block: If True, builds formatted_context markdown.
-
-        Returns:
-            RetrievalResult containing ranked RetrievalHit objects and formatted context.
-        """
+        """Retrieve the top-k most relevant document chunks for a query."""
         start_time = time.perf_counter()
         k = top_k or self.default_top_k
         clean_q = query.strip()
@@ -215,29 +224,43 @@ class HybridRetriever:
                 formatted_context="",
             )
 
+        query_tokens = tokenize_query(clean_q)
+
+        # Fetch dense candidates
         fetch_k = min(self.vector_store.total_chunks, max(k * 3, 20))
         dense_results = self.vector_store.similarity_search(clean_q, top_k=fetch_k, min_score=0.0)
 
-        hits: List[RetrievalHit] = []
-        for rank_idx, (chunk, dense_score) in enumerate(dense_results[:k], start=1):
+        scored_candidates: List[RetrievalHit] = []
+        for chunk, dense_score in dense_results:
+            kw_score = self.compute_keyword_score(query_tokens, chunk.text, clean_q)
+            # Combine dense and keyword
+            combined_score = self.dense_weight * dense_score + self.keyword_weight * kw_score
             hit = RetrievalHit(
                 chunk=chunk,
                 dense_score=dense_score,
-                hybrid_score=dense_score,
-                confidence_score=dense_score,
-                rank=rank_idx,
+                keyword_score=kw_score,
+                hybrid_score=combined_score,
+                confidence_score=combined_score,
             )
-            hits.append(hit)
+            scored_candidates.append(hit)
+
+        # Sort descending by hybrid_score
+        scored_candidates.sort(key=lambda h: h.hybrid_score, reverse=True)
+
+        # Assign final rank
+        top_hits = scored_candidates[:k]
+        for rank_idx, hit in enumerate(top_hits, start=1):
+            hit.rank = rank_idx
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        top_conf = hits[0].confidence_score if hits else 0.0
+        top_conf = top_hits[0].confidence_score if top_hits else 0.0
 
-        ctx = format_context(hits, max_characters=self.max_context_chars) if format_context_block else ""
+        ctx = format_context(top_hits, max_characters=self.max_context_chars) if format_context_block else ""
 
         return RetrievalResult(
             query=query,
-            hits=hits,
-            total_hits=len(hits),
+            hits=top_hits,
+            total_hits=len(top_hits),
             execution_time_ms=elapsed_ms,
             is_confident=top_conf >= self.min_confidence,
             top_confidence=top_conf,
