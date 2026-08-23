@@ -259,17 +259,45 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     st.title("🤖 AI Knowledge Assistant")
     st.caption("Phase 4 Grounded Generation & Verification System")
 
+    # Sidebar configuration panel
+    st.sidebar.header("Configuration")
+    st.session_state.model = st.sidebar.text_input("LLM Model Name", value=st.session_state.model)
+    st.session_state.threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, value=st.session_state.threshold, step=0.05)
+    st.session_state.offline = st.sidebar.checkbox("Force Offline Mode", value=st.session_state.offline)
+
     # Render current chat messages
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+            st.markdown(msg["content"])
 
     # User input chat box
     if user_input := st.chat_input("Ask a grounded question..."):
         # Append and display user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
-            st.write(user_input)
+            st.markdown(user_input)
+
+        # Initialize engine with updated session states
+        engine_args = argparse.Namespace(
+            vector_store=args.vector_store,
+            model=st.session_state.model,
+            offline=st.session_state.offline,
+            threshold=st.session_state.threshold,
+        )
+        engine = init_engine(engine_args)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Retrieving knowledge and generating response..."):
+                response = engine.generate_answer(user_input)
+
+            # For now, display answer text. In subsequent commits, we will style citations and metadata.
+            st.markdown(response.answer)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.answer,
+                "response_data": response.to_dict(),
+            })
+            st.rerun()
 
 
 def main() -> None:
