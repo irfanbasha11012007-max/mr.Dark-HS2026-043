@@ -339,22 +339,29 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     st.session_state.threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, value=st.session_state.threshold, step=0.05)
     st.session_state.offline = st.sidebar.checkbox("Force Offline Mode", value=st.session_state.offline)
 
-    # Render current chat messages
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            if msg["role"] == "assistant":
-                render_streamlit_assistant_msg(msg["content"], msg.get("response_data"))
-            else:
-                st.markdown(msg["content"])
+    # Render main tabs
+    tab_chat, tab_inspector = st.tabs(["💬 Chat Playground", "🔍 Knowledge Base Inspector"])
 
-    # User input chat box
-    if user_input := st.chat_input("Ask a grounded question..."):
-        # Append and display user message
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
+    with tab_chat:
+        # Render current chat messages
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                if msg["role"] == "assistant":
+                    render_streamlit_assistant_msg(msg["content"], msg.get("response_data"))
+                else:
+                    st.markdown(msg["content"])
 
-        # Initialize engine with updated session states
+        # User input chat box
+        if user_input := st.chat_input("Ask a grounded question..."):
+            # Append and display user message
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            st.rerun()  # Triggers re-render to display user message immediately
+
+    # If new user input is detected but assistant hasn't responded yet
+    if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+        user_query = st.session_state.messages[-1]["content"]
+
+        # Initialize engine
         engine_args = argparse.Namespace(
             vector_store=args.vector_store,
             model=st.session_state.model,
@@ -363,17 +370,57 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
         )
         engine = init_engine(engine_args)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Retrieving knowledge and generating response..."):
-                response = engine.generate_answer(user_input)
+        with tab_chat:
+            with st.chat_message("assistant"):
+                with st.spinner("Retrieving knowledge and generating response..."):
+                    response = engine.generate_answer(user_query)
 
-            render_streamlit_assistant_msg(response.answer, response.to_dict())
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response.answer,
-                "response_data": response.to_dict(),
-            })
-            st.rerun()
+                render_streamlit_assistant_msg(response.answer, response.to_dict())
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response.answer,
+                    "response_data": response.to_dict(),
+                })
+                st.rerun()
+
+    with tab_inspector:
+        st.subheader("Stored Document Chunks")
+        vs_path = Path(args.vector_store)
+        if vs_path.exists():
+            try:
+                vstore = VectorStore.load(vs_path)
+                st.info(f"Loaded {len(vstore.chunks)} document chunks from persistent index: `{vs_path}`")
+
+                # Simple search / inspect interface
+                search_q = st.text_input("Simulate Hybrid Retrieval Search", key="inspector_search_box")
+                if search_q:
+                    retriever = HybridRetriever(vector_store=vstore)
+                    res = retriever.retrieve(search_q)
+                    st.write(f"Found **{len(res.hits)}** hits (Top Score: `{res.top_confidence:.3f}`):")
+                    for h_idx, hit in enumerate(res.hits, 1):
+                        with st.expander(
+                            f"Hit {h_idx}: {Path(hit.chunk.source).name} (Score: {hit.confidence_score:.3f})"
+                        ):
+                            st.write(f"**Section Header:** `{hit.chunk.section_header or 'N/A'}`")
+                            st.write(f"**PDF Page:** `{hit.chunk.metadata.get('page_number', 'N/A')}`")
+                            st.write(f"**Scores:** dense=`{hit.dense_score:.3f}` | keyword=`{hit.keyword_score:.3f}` | prefix=`{hit.prefix_score:.3f}`")
+                            st.text_area("Chunk Content", value=hit.chunk.text, height=120)
+                else:
+                    # Render table of raw chunks
+                    chunk_data = []
+                    for idx, c in enumerate(vstore.chunks):
+                        chunk_data.append({
+                            "Index": idx + 1,
+                            "Source": Path(c.source).name,
+                            "Section Header": c.section_header or "N/A",
+                            "Char Range": f"{c.start_char}-{c.end_char}",
+                            "Content": c.text[:120] + "..." if len(c.text) > 120 else c.text,
+                        })
+                    st.dataframe(chunk_data, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error loading index: {e}")
+        else:
+            st.warning(f"No persistent index found at `{vs_path}`. Build index to view database.")
 
 
 def main() -> None:
