@@ -236,6 +236,25 @@ def setup_streamlit_styling() -> None:
     )
 
 
+def render_streamlit_assistant_msg(content: str, response_data: dict | None) -> None:
+    """Helper to render assistant text and details like citations in Streamlit."""
+    st.markdown(content)
+
+    if response_data and response_data.get("citations"):
+        citations = response_data["citations"]
+        with st.expander("📚 Grounding Sources & Citations", expanded=False):
+            # Create a structured list showing provenance
+            for idx, cit in enumerate(citations, 1):
+                src_name = Path(cit["source"]).name
+                sec = cit.get("section") or "N/A"
+                page = f"Page {cit['page']}" if cit.get("page") is not None else "Page N/A"
+                st.markdown(
+                    f"**[{idx}] `{src_name}`** | Section: *{sec}* | {page} | Confidence: `{cit.get('confidence', 0.0):.3f}`"
+                )
+                if cit.get("snippet"):
+                    st.caption(f'Snippet: "{cit["snippet"]}"')
+
+
 def run_streamlit_app(args: argparse.Namespace) -> None:
     """Run interactive Streamlit web application."""
     st.set_page_config(
@@ -268,7 +287,10 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     # Render current chat messages
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                render_streamlit_assistant_msg(msg["content"], msg.get("response_data"))
+            else:
+                st.markdown(msg["content"])
 
     # User input chat box
     if user_input := st.chat_input("Ask a grounded question..."):
@@ -290,8 +312,7 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
             with st.spinner("Retrieving knowledge and generating response..."):
                 response = engine.generate_answer(user_input)
 
-            # For now, display answer text. In subsequent commits, we will style citations and metadata.
-            st.markdown(response.answer)
+            render_streamlit_assistant_msg(response.answer, response.to_dict())
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": response.answer,
