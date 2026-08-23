@@ -405,6 +405,9 @@ def clean_sentence_for_offline_answer(sent: str) -> str:
     sent = sent.replace('**', '').replace('__', '')
     # 3. Strip Q&A indicators at the start of sentence safely (using delimiters like space, dot, colon, dash)
     sent = re.sub(r'^(Q\d+[\.\s\-\:]|A\d*[\.\s\-\:]|A[\.\s\-\:])\s*', '', sent)
+    # 4. Strip leading/trailing horizontal rules or dashes
+    sent = re.sub(r'\s*---+\s*$', '', sent)
+    sent = re.sub(r'^\s*---+\s*', '', sent)
     return sent.strip()
 
 
@@ -422,8 +425,8 @@ def find_active_header_in_chunk(chunk_text: str, sent: str, fallback_header: Opt
         # The title group is at group(2)
         headers.append((match.start(), match.group(2).strip()))
         
-    # Match numeric headers anywhere in text
-    num_header_regex = re.compile(r"(?:^|[\r\n\s])(?:Section\s+)?(\d+(?:\.\d+)*)\s+([A-Za-z][^\r\n]+)")
+    # Match numeric headers anywhere in text (preceded by newline or start of string)
+    num_header_regex = re.compile(r"(?:^|[\r\n])(?:Section\s+)?(\d+(?:\.\d+)*)\s+([A-Z][^\r\n]+)")
     for match in num_header_regex.finditer(chunk_text):
         headers.append((match.start(), f"{match.group(1)} {match.group(2).strip()}"))
 
@@ -459,37 +462,40 @@ def generate_offline_grounded_answer(
         chunk = hit.chunk
         lines = [line.strip() for line in chunk.text.split("\n") if line.strip()]
         for line in lines:
-            sentences = re.split(r"(?<=[.!?])\s+", line)
-            for sent in sentences:
-                cleaned_sent = sent.strip()
-                if not cleaned_sent:
-                    continue
-                # Skip sentences that are questions (end with a question mark)
-                if cleaned_sent.rstrip('*_').endswith("?"):
-                    continue
-
-                sent_lower = cleaned_sent.lower()
-                overlap = sum(1 for t in q_tokens if t in sent_lower)
-                if overlap > 0:
-                    cleaned_body = clean_sentence_for_offline_answer(cleaned_sent)
-                    if not cleaned_body or len(cleaned_body.split()) < 4:
-                        # Skip empty or very short lines (like headers or category labels)
+            # Split line by inline headers and Q&A tags inside it
+            sub_lines = re.split(r'\s*(?:#+\s+|(?=Q\d+[\.\s\-\:])|(?=A\d*[\.\s\-\:]))', line)
+            for sub_line in sub_lines:
+                sentences = re.split(r"(?<=[.!?])\s+", sub_line.strip())
+                for sent in sentences:
+                    cleaned_sent = sent.strip()
+                    if not cleaned_sent:
+                        continue
+                    # Skip sentences that are questions (end with a question mark)
+                    if cleaned_sent.rstrip('*_').endswith("?"):
                         continue
 
-                    # Determine exact active section header for this sentence inside the chunk
-                    exact_section = find_active_header_in_chunk(chunk.text, cleaned_sent, chunk.section_header)
+                    sent_lower = cleaned_sent.lower()
+                    overlap = sum(1 for t in q_tokens if t in sent_lower)
+                    if overlap > 0:
+                        cleaned_body = clean_sentence_for_offline_answer(cleaned_sent)
+                        if not cleaned_body or len(cleaned_body.split()) < 4:
+                            # Skip empty or very short lines (like headers or category labels)
+                            continue
 
-                    citation = Citation(
-                        source=chunk.source,
-                        section=exact_section,
-                        page=chunk.metadata.get("page_number"),
-                        snippet=cleaned_body,
-                        confidence=hit.confidence_score,
-                        doc_id=chunk.doc_id,
-                        chunk_id=chunk.chunk_id,
-                    )
-                    tag = citation.format_citation_tag(idx)
-                    matching_sentences.append((f"{cleaned_body} {tag}", citation))
+                        # Determine exact active section header for this sentence inside the chunk
+                        exact_section = find_active_header_in_chunk(chunk.text, cleaned_sent, chunk.section_header)
+
+                        citation = Citation(
+                            source=chunk.source,
+                            section=exact_section,
+                            page=chunk.metadata.get("page_number"),
+                            snippet=cleaned_body,
+                            confidence=hit.confidence_score,
+                            doc_id=chunk.doc_id,
+                            chunk_id=chunk.chunk_id,
+                        )
+                        tag = citation.format_citation_tag(idx)
+                        matching_sentences.append((f"{cleaned_body} {tag}", citation))
 
     if not matching_sentences:
         top_hit = hits[0]
