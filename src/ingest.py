@@ -168,13 +168,9 @@ def generate_doc_id(file_path: Union[str, Path], content: Optional[str] = None) 
 
 
 def extract_section_spans(text: str) -> List[Dict[str, Any]]:
-    """Detect section headings and their character ranges in document text.
-
-    Supports Markdown headers (# to ######) as well as numbered / capitalized section headings.
-    """
+    """Detect section headings and their character ranges in document text."""
     section_spans: List[Dict[str, Any]] = []
 
-    # Pattern 1: Markdown headers (# Header)
     md_header_regex = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
     for match in md_header_regex.finditer(text):
         level = len(match.group(1))
@@ -187,7 +183,6 @@ def extract_section_spans(text: str) -> List[Dict[str, Any]]:
             "raw": match.group(0),
         })
 
-    # Pattern 2: Numbered section titles (e.g. '1. Introduction', 'Section 2.3 System Architecture')
     if not section_spans:
         num_header_regex = re.compile(r"^(?:Section\s+)?(\d+(?:\.\d+)*)\s+([A-Z][^\n\r]+)$", re.MULTILINE)
         for match in num_header_regex.finditer(text):
@@ -202,30 +197,22 @@ def extract_section_spans(text: str) -> List[Dict[str, Any]]:
                 "raw": match.group(0),
             })
 
-    # Sort spans by their occurrence index
     section_spans.sort(key=lambda s: s["start"])
     return section_spans
 
 
 def find_active_section(char_offset: int, section_spans: Sequence[Dict[str, Any]]) -> Tuple[Optional[str], List[str]]:
-    """Determine the active section header and hierarchical trail for a given character offset.
-
-    Returns:
-        A tuple of (active_header_str, hierarchy_list).
-    """
+    """Determine the active section header and hierarchical trail for a given character offset."""
     if not section_spans:
         return None, []
 
-    # Find the most recent section preceding or starting at char_offset
     active_span: Optional[Dict[str, Any]] = None
     hierarchy: List[str] = []
 
     for span in section_spans:
         if span["start"] <= char_offset:
             active_span = span
-            # Maintain hierarchical tree
             level = span["level"]
-            # Pop deeper or equal levels
             while hierarchy and len(hierarchy) >= level:
                 hierarchy.pop()
             hierarchy.append(span["title"])
@@ -236,6 +223,14 @@ def find_active_section(char_offset: int, section_spans: Sequence[Dict[str, Any]
         return None, []
 
     return active_span["title"], list(hierarchy)
+
+
+def map_offset_to_page(char_offset: int, page_spans: Sequence[Dict[str, Any]]) -> Optional[int]:
+    """Map a character offset in PDF content to a 1-indexed page number."""
+    for page in page_spans:
+        if page["start_char"] <= char_offset <= page["end_char"]:
+            return page["page_number"]
+    return page_spans[0]["page_number"] if page_spans else None
 
 
 def load_text_document(file_path: Union[str, Path]) -> Document:
@@ -501,7 +496,6 @@ class RecursiveCharacterChunker:
         if not text:
             return final_chunks
 
-        # Find first separator that exists in text
         chosen_separator = ""
         new_separators: Sequence[str] = ()
 
@@ -515,7 +509,6 @@ class RecursiveCharacterChunker:
                 new_separators = separators[i + 1:]
                 break
 
-        # Split with chosen separator
         if chosen_separator:
             splits = text.split(chosen_separator)
         else:
@@ -563,7 +556,6 @@ class RecursiveCharacterChunker:
 
         raw_splits = self._split_text_recursive(text, self.separators)
 
-        # Merge small adjacent pieces up to chunk_size
         merged_chunks: List[str] = []
         current_chunk: List[str] = []
         current_length = 0
@@ -588,7 +580,6 @@ class RecursiveCharacterChunker:
             if len(merged) >= self.min_chunk_length or not merged_chunks:
                 merged_chunks.append(merged)
 
-        # Apply overlap across consecutive chunks
         if self.chunk_overlap <= 0 or len(merged_chunks) <= 1:
             return merged_chunks
 
@@ -607,3 +598,127 @@ class RecursiveCharacterChunker:
                 overlapped_chunks.append(curr_chunk)
 
         return overlapped_chunks
+
+
+def compute_character_offsets(
+    chunks: Sequence[str],
+    original_text: str,
+) -> List[Tuple[int, int]]:
+    """Accurately compute (start_char, end_char) offsets for each chunk in the source text.
+
+    Uses cursor progression and fallback matching to guarantee monotonic, accurate boundary spans.
+    """
+    offsets: List[Tuple[int, int]] = []
+    cursor = 0
+    doc_len = len(original_text)
+
+    for chunk in chunks:
+        clean_target = chunk.strip()
+        if not clean_target:
+            offsets.append((cursor, cursor))
+            continue
+
+        # Strategy 1: Look for exact chunk match starting from current cursor
+        found_idx = original_text.find(clean_target, cursor)
+
+        # Strategy 2: Look for match anywhere from cursor onwards (or wrap around if needed)
+        if found_idx == -1:
+            # Check from beginning if cursor advanced past an overlap
+            found_idx = original_text.find(clean_target)
+
+        # Strategy 3: Substring prefix match (first 25-40 chars of chunk)
+        if found_idx == -1:
+            prefix_sample = clean_target[:min(35, len(clean_target))]
+            found_idx = original_text.find(prefix_sample, cursor)
+            if found_idx == -1:
+                found_idx = original_text.find(prefix_sample)
+
+        # Fallback: Sequential slice from cursor
+        if found_idx != -1:
+            start_pos = found_idx
+            end_pos = min(start_pos + len(clean_target), doc_len)
+            # Advance cursor moderately to allow overlapping subsequent chunks
+            cursor = max(cursor, start_pos + 1)
+        else:
+            start_pos = min(cursor, doc_len)
+            end_pos = min(start_pos + len(clean_target), doc_len)
+            cursor = end_pos
+
+        offsets.append((start_pos, end_pos))
+
+    return offsets
+
+
+def chunk_document(
+    doc: Document,
+    config: Optional[IngestionConfig] = None,
+) -> List[DocumentChunk]:
+    """Process and chunk a Document into a list of enriched DocumentChunk objects.
+
+    Calculates exact start_char / end_char spans, maps section headers, page numbers,
+    and attaches comprehensive chunk metadata.
+    """
+    cfg = config or default_config
+    text_to_process = doc.content
+
+    if cfg.clean_whitespace:
+        # Note: clean text while keeping structure intact
+        text_to_process = clean_text(
+            text_to_process,
+            clean_whitespace=cfg.clean_whitespace,
+            normalize_unicode=cfg.normalize_unicode,
+        )
+
+    # Detect section headings in document text
+    section_spans = extract_section_spans(text_to_process) if cfg.extract_headers else []
+
+    chunker = RecursiveCharacterChunker(
+        chunk_size=cfg.chunk_size,
+        chunk_overlap=cfg.chunk_overlap,
+        min_chunk_length=cfg.min_chunk_length,
+        separators=cfg.separators,
+    )
+
+    raw_chunk_texts = chunker.split_text(text_to_process)
+    if not raw_chunk_texts:
+        return []
+
+    offsets = compute_character_offsets(raw_chunk_texts, text_to_process)
+    total_chunks = len(raw_chunk_texts)
+    chunks: List[DocumentChunk] = []
+
+    for idx, (chunk_text, (start_char, end_char)) in enumerate(zip(raw_chunk_texts, offsets)):
+        chunk_id = f"{doc.doc_id}#chunk_{idx:04d}"
+        active_header, hierarchy = find_active_section(start_char, section_spans)
+
+        # Build comprehensive metadata
+        chunk_meta: Dict[str, Any] = {
+            **doc.metadata,
+            "chunk_index": idx,
+            "total_chunks": total_chunks,
+            "section_hierarchy": hierarchy,
+            "doc_id": doc.doc_id,
+            "doc_type": doc.doc_type,
+            "file_name": doc.metadata.get("file_name", Path(doc.source).name),
+            "char_count": len(chunk_text),
+            "word_count": len(chunk_text.split()),
+        }
+
+        # If PDF, add page number mapping
+        if doc.doc_type == "pdf" and "pages" in doc.metadata:
+            chunk_meta["page_number"] = map_offset_to_page(start_char, doc.metadata["pages"])
+
+        chunk = DocumentChunk(
+            chunk_id=chunk_id,
+            doc_id=doc.doc_id,
+            text=chunk_text,
+            start_char=start_char,
+            end_char=end_char,
+            chunk_index=idx,
+            source=doc.source,
+            section_header=active_header,
+            metadata=chunk_meta,
+        )
+        chunks.append(chunk)
+
+    return chunks
