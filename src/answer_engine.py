@@ -398,6 +398,16 @@ def parse_and_bind_citations(
     return citations
 
 
+def clean_sentence_for_offline_answer(sent: str) -> str:
+    # 1. Strip markdown headers
+    sent = re.sub(r'^#+\s+', '', sent)
+    # 2. Strip bold delimiters
+    sent = sent.replace('**', '').replace('__', '')
+    # 3. Strip Q&A indicators at the start of sentence safely (using delimiters like space, dot, colon, dash)
+    sent = re.sub(r'^(Q\d+[\.\s\-\:]|A\d*[\.\s\-\:]|A[\.\s\-\:])\s*', '', sent)
+    return sent.strip()
+
+
 def generate_offline_grounded_answer(
     question: str,
     hits: Sequence[RetrievalHit],
@@ -406,42 +416,67 @@ def generate_offline_grounded_answer(
     if not hits:
         return STANDARD_ABSTENTION_MESSAGE, []
 
+    # Keep only top-tier hits (within 0.15 of the top hit confidence score)
+    top_score = hits[0].confidence_score
+    hits = [h for h in hits if h.confidence_score >= top_score - 0.15]
+
     q_tokens = tokenize_query(question)
     matching_sentences: List[Tuple[str, Citation]] = []
 
     for idx, hit in enumerate(hits, start=1):
         chunk = hit.chunk
-        sentences = re.split(r"(?<=[.!?])\s+", chunk.text.strip())
-        for sent in sentences:
-            sent_lower = sent.lower()
-            overlap = sum(1 for t in q_tokens if t in sent_lower)
-            if overlap > 0:
-                citation = Citation(
-                    source=chunk.source,
-                    section=chunk.section_header,
-                    page=chunk.metadata.get("page_number"),
-                    snippet=sent.strip(),
-                    confidence=hit.confidence_score,
-                    doc_id=chunk.doc_id,
-                    chunk_id=chunk.chunk_id,
-                )
-                tag = citation.format_citation_tag(idx)
-                matching_sentences.append((f"{sent.strip()} {tag}", citation))
+        lines = [line.strip() for line in chunk.text.split("\n") if line.strip()]
+        for line in lines:
+            sentences = re.split(r"(?<=[.!?])\s+", line)
+            for sent in sentences:
+                cleaned_sent = sent.strip()
+                if not cleaned_sent:
+                    continue
+                # Skip sentences that are questions (end with a question mark)
+                if cleaned_sent.rstrip('*_').endswith("?"):
+                    continue
+
+                sent_lower = cleaned_sent.lower()
+                overlap = sum(1 for t in q_tokens if t in sent_lower)
+                if overlap > 0:
+                    cleaned_body = clean_sentence_for_offline_answer(cleaned_sent)
+                    if not cleaned_body or len(cleaned_body.split()) < 4:
+                        # Skip empty or very short lines (like headers or category labels)
+                        continue
+
+                    citation = Citation(
+                        source=chunk.source,
+                        section=chunk.section_header,
+                        page=chunk.metadata.get("page_number"),
+                        snippet=cleaned_body,
+                        confidence=hit.confidence_score,
+                        doc_id=chunk.doc_id,
+                        chunk_id=chunk.chunk_id,
+                    )
+                    tag = citation.format_citation_tag(idx)
+                    matching_sentences.append((f"{cleaned_body} {tag}", citation))
 
     if not matching_sentences:
         top_hit = hits[0]
         top_chunk = top_hit.chunk
-        first_sent = top_chunk.text.split("\n")[0].strip()
+        lines = [line.strip() for line in top_chunk.text.split("\n") if line.strip()]
+        selected_line = lines[0]
+        for line in lines:
+            if not line.rstrip('*_').endswith("?"):
+                selected_line = line
+                break
+
+        cleaned_first = clean_sentence_for_offline_answer(selected_line)
         citation = Citation(
             source=top_chunk.source,
             section=top_chunk.section_header,
             page=top_chunk.metadata.get("page_number"),
-            snippet=first_sent,
+            snippet=cleaned_first,
             confidence=top_hit.confidence_score,
             doc_id=top_chunk.doc_id,
             chunk_id=top_chunk.chunk_id,
         )
-        return f"{first_sent} {citation.format_citation_tag(1)}", [citation]
+        return f"{cleaned_first} {citation.format_citation_tag(1)}", [citation]
 
     selected_texts: List[str] = []
     selected_citations: List[Citation] = []

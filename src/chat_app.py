@@ -406,9 +406,18 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     )
 
     # Top level actions
-    if st.sidebar.button("New Chat", key="btn_new_chat", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
+    col_chat, col_exit = st.sidebar.columns(2)
+    with col_chat:
+        if st.button("New Chat", key="btn_new_chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+    with col_exit:
+        if st.button("Exit", key="btn_exit", use_container_width=True):
+            st.sidebar.info("Stopping application...")
+            import os
+            import time
+            time.sleep(0.5)
+            os._exit(0)
 
     st.sidebar.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
