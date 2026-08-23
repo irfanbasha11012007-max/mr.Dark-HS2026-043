@@ -10,11 +10,13 @@ This module orchestrates the generation phase of the RAG pipeline:
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
 import re
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from src.embed_store import VectorStore
 from src.retriever import HybridRetriever, RetrievalHit, RetrievalResult, tokenize_query
 
 logger = logging.getLogger(__name__)
@@ -607,3 +610,29 @@ class AnswerEngine:
                 model_name="offline-synthesizer-fallback",
                 metadata={"mode": "offline_fallback_on_error", "error": str(e)},
             )
+
+
+def main() -> None:
+    """CLI Entry point for Knowledge Assistant Answer Engine."""
+    parser = argparse.ArgumentParser(description="Query Knowledge Assistant Answer Engine")
+    parser.add_argument("query", nargs="?", help="Question to ask")
+    parser.add_argument("--vector-store", default="data/vector_store.json", help="Path to vector store index")
+    parser.add_argument("--model", default="openai/gpt-4o-mini", help="Model name for generation")
+    parser.add_argument("--offline", action="store_true", help="Force offline grounded synthesizer")
+    args = parser.parse_args()
+
+    query = args.query or "What is Knowledge Assistant?"
+
+    vs_path = Path(args.vector_store)
+    retriever = None
+    if vs_path.exists():
+        vstore = VectorStore.load(vs_path)
+        retriever = HybridRetriever(vector_store=vstore)
+
+    engine = AnswerEngine(retriever=retriever, model_name=args.model, offline_mode=args.offline)
+    response = engine.generate_answer(query)
+    print(response.to_json(indent=2))
+
+
+if __name__ == "__main__":
+    main()
