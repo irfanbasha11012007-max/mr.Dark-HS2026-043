@@ -303,6 +303,59 @@ def normalize_abstention_response(raw_text: str) -> Tuple[str, bool]:
     return cleaned, False
 
 
+def parse_and_bind_citations(
+    raw_response_text: str,
+    hits: Sequence[RetrievalHit],
+) -> List[Citation]:
+    """Extract and cross-reference inline citations in generated text against retrieved hits."""
+    if not raw_response_text or not hits:
+        return []
+
+    citations: List[Citation] = []
+    seen_chunk_ids = set()
+
+    # Find [Source X], [Doc X], [Document X] patterns
+    source_matches = re.findall(r"\[(?:Source|Doc|Document)\s*(\d+)[^\]]*\]", raw_response_text, re.IGNORECASE)
+    for match in source_matches:
+        try:
+            source_idx = int(match)
+            if 1 <= source_idx <= len(hits):
+                hit = hits[source_idx - 1]
+                chunk = hit.chunk
+                if chunk.chunk_id not in seen_chunk_ids:
+                    seen_chunk_ids.add(chunk.chunk_id)
+                    citations.append(
+                        Citation(
+                            source=chunk.source,
+                            section=chunk.section_header,
+                            page=chunk.metadata.get("page_number"),
+                            snippet=chunk.text[:200].strip(),
+                            confidence=hit.confidence_score,
+                            doc_id=chunk.doc_id,
+                            chunk_id=chunk.chunk_id,
+                        )
+                    )
+        except ValueError:
+            continue
+
+    # If no explicit numbered brackets found, bind top-1 chunk if confidence is high
+    if not citations and hits and hits[0].confidence_score > 0.3:
+        top_chunk = hits[0].chunk
+        citations.append(
+            Citation(
+                source=top_chunk.source,
+                section=top_chunk.section_header,
+                page=top_chunk.metadata.get("page_number"),
+                snippet=top_chunk.text[:200].strip(),
+                confidence=hits[0].confidence_score,
+                doc_id=top_chunk.doc_id,
+                chunk_id=top_chunk.chunk_id,
+            )
+        )
+
+    return citations
+
+
 def generate_offline_grounded_answer(
     question: str,
     hits: Sequence[RetrievalHit],
@@ -334,7 +387,6 @@ def generate_offline_grounded_answer(
                 matching_sentences.append((f"{sent.strip()} {tag}", citation))
 
     if not matching_sentences:
-        # Fallback to top chunk first sentence if no token exact match
         top_hit = hits[0]
         top_chunk = top_hit.chunk
         first_sent = top_chunk.text.split("\n")[0].strip()
@@ -349,7 +401,6 @@ def generate_offline_grounded_answer(
         )
         return f"{first_sent} {citation.format_citation_tag(1)}", [citation]
 
-    # Select top matching unique sentences up to 3
     selected_texts: List[str] = []
     selected_citations: List[Citation] = []
     seen = set()
@@ -473,12 +524,46 @@ class AnswerEngine:
                 metadata={"mode": "offline"},
             )
 
-        return AnswerResponse(
-            question=clean_q,
-            answer=STANDARD_ABSTENTION_MESSAGE,
-            abstained=True,
-            abstention_reason="Pending live completion integration",
-            retrieval_confidence=top_conf,
-            latency_ms=(time.perf_counter() - start_time) * 1000,
-            model_name=self.model_name,
-        )
+        # Live LLM generation with prompt formatting
+        try:
+            ctx_block = r_result.formatted_context if r_result else ""
+            user_prompt = build_user_prompt(clean_q, ctx_block)
+            messages = [
+                {"role": "system", "content": STRICT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+            llm_res = self.llm_client.complete_chat(messages, model=self.model_name)
+            raw_content = llm_res.get("content", "")
+            norm_answer, is_abstained = normalize_abstention_response(raw_content)
+
+            citations = parse_and_bind_citations(raw_content, hits) if not is_abstained else []
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+            return AnswerResponse(
+                question=clean_q,
+                answer=norm_answer,
+                citations=citations,
+                abstained=is_abstained,
+                abstention_reason=None if not is_abstained else "Model abstained based on context absence",
+                retrieval_confidence=top_conf,
+                latency_ms=elapsed_ms,
+                tokens_used=llm_res.get("tokens_used", 0),
+                model_name=self.model_name,
+                metadata={"mode": "live_llm"},
+            )
+        except Exception as e:
+            logger.warning("LLM API call failed (%s), falling back to offline grounded generation", e)
+            answer_text, citations = generate_offline_grounded_answer(clean_q, hits)
+            norm_answer, is_abstained = normalize_abstention_response(answer_text)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            return AnswerResponse(
+                question=clean_q,
+                answer=norm_answer,
+                citations=citations if not is_abstained else [],
+                abstained=is_abstained,
+                abstention_reason=None if not is_abstained else "Normalized offline refusal",
+                retrieval_confidence=top_conf,
+                latency_ms=elapsed_ms,
+                model_name="offline-synthesizer-fallback",
+                metadata={"mode": "offline_fallback_on_error", "error": str(e)},
+            )
