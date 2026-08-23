@@ -398,6 +398,29 @@ def parse_and_bind_citations(
     return citations
 
 
+# Section headers that should NEVER be used as answer sources
+_EXCLUDED_SECTIONS = frozenset({
+    "SCOPE NOTE (For Assistant Use)",
+    "scope note",
+})
+
+
+def _is_scope_note_chunk(chunk) -> bool:
+    """Return True if this chunk belongs to the out-of-scope note section."""
+    header = (chunk.section_header or "").strip()
+    hier = chunk.metadata.get("section_hierarchy", [])
+    # Check direct header
+    if any(s.lower().startswith("scope note") for s in [header] + list(hier)):
+        return True
+    # Check chunk text starts with the scope note marker
+    if "SCOPE NOTE" in chunk.text[:120]:
+        return True
+    # Also filter the data-accuracy disclaimer chunk
+    if "intentionally **not included**" in chunk.text or "intentionally not included" in chunk.text:
+        return True
+    return False
+
+
 def clean_sentence_for_offline_answer(sent: str) -> str:
     # 1. Strip markdown headers
     sent = re.sub(r'^#+\s+', '', sent)
@@ -405,7 +428,9 @@ def clean_sentence_for_offline_answer(sent: str) -> str:
     sent = sent.replace('**', '').replace('__', '')
     # 3. Strip Q&A indicators at the start of sentence safely (using delimiters like space, dot, colon, dash)
     sent = re.sub(r'^(Q\d+[\.\s\-\:]|A\d*[\.\s\-\:]|A[\.\s\-\:])\s*', '', sent)
-    # 4. Strip leading/trailing horizontal rules or dashes
+    # 4. Strip leading bullet/list dashes
+    sent = re.sub(r'^-\s+', '', sent)
+    # 5. Strip leading/trailing horizontal rules or dashes
     sent = re.sub(r'\s*---+\s*$', '', sent)
     sent = re.sub(r'^\s*---+\s*', '', sent)
     return sent.strip()
@@ -460,8 +485,14 @@ def generate_offline_grounded_answer(
 
     for idx, hit in enumerate(hits, start=1):
         chunk = hit.chunk
+        # Skip chunks that belong to the SCOPE NOTE section entirely
+        if _is_scope_note_chunk(chunk):
+            continue
         lines = [line.strip() for line in chunk.text.split("\n") if line.strip()]
         for line in lines:
+            # Skip lines that are part of scope note content even in mixed chunks
+            if line.strip().upper().startswith("SCOPE NOTE") or "not covered in this knowledge base" in line.lower():
+                continue
             # Split line by inline headers and Q&A tags inside it
             sub_lines = re.split(r'\s*(?:#+\s+|(?=Q\d+[\.\s\-\:])|(?=A\d*[\.\s\-\:]))', line)
             for sub_line in sub_lines:
