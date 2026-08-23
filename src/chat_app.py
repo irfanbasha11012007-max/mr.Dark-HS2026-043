@@ -246,9 +246,23 @@ def run_streamlit_app(args: argparse.Namespace) -> None:
     )
     setup_streamlit_styling()
 
+    # Session State Initialization
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "threshold" not in st.session_state:
+        st.session_state.threshold = args.threshold
+    if "offline" not in st.session_state:
+        st.session_state.offline = args.offline
+    if "model" not in st.session_state:
+        st.session_state.model = args.model
+
     st.title("🤖 AI Knowledge Assistant")
     st.caption("Phase 4 Grounded Generation & Verification System")
-    st.write("Welcome to the interactive RAG playground.")
+
+    # Render current chat messages (placeholder render)
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
 
 
 def main() -> None:
