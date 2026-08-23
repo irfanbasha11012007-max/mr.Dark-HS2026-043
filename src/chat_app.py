@@ -9,6 +9,7 @@ import argparse
 import logging
 import os
 import sys
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -28,10 +29,10 @@ console = Console()
 
 # Clean sample queries for the ChatGPT-like welcome cards (no emojis)
 SAMPLE_CARDS = [
+    {"label": "Principal & Placements", "query": "Who is the current principal of MCET and what companies visit for placements?"},
     {"label": "Attendance Policy", "query": "What is the minimum attendance requirement at MCET?"},
-    {"label": "Library Rules", "query": "How many books can a student borrow from the library?"},
-    {"label": "Leave Policy", "query": "How many working days does a student have to report emergency leave?"},
-    {"label": "Admissions Info", "query": "How are B.Tech admissions conducted at MCET?"},
+    {"label": "Hostel Facilities", "query": "Does MCET provide separate hostels for boys and girls?"},
+    {"label": "Admissions Procedure", "query": "How are B.Tech and MCA admissions conducted at MCET?"},
 ]
 
 
@@ -321,12 +322,15 @@ def render_streamlit_assistant_msg(content: str, response_data: dict | None) -> 
     """Helper to render assistant text and details like citations in Streamlit."""
     is_abstained = response_data.get("abstained", False) if response_data else False
 
+    # Format inline citations into clean, professional superscript tags
+    cleaned_content = re.sub(r'\[Source\s+(\d+):[^\]]+\]', r'<sup>[\1]</sup>', content)
+
     if is_abstained:
         st.markdown(
             f"""
             <div class="abstention-card">
                 <div class="header-abstention">Abstention / Information Not Found</div>
-                {content}
+                {cleaned_content}
             </div>
             """,
             unsafe_allow_html=True,
@@ -336,7 +340,7 @@ def render_streamlit_assistant_msg(content: str, response_data: dict | None) -> 
             f"""
             <div class="grounded-card">
                 <div class="header-grounded">Grounded Answer</div>
-                {content}
+                {cleaned_content}
             </div>
             """,
             unsafe_allow_html=True,
