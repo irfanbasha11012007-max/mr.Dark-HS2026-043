@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -112,3 +114,70 @@ class DocumentChunk:
             section_header=data.get("section_header"),
             metadata=data.get("metadata", {}),
         )
+
+
+def generate_doc_id(file_path: Union[str, Path], content: Optional[str] = None) -> str:
+    """Generate a deterministic document identifier from path and optional content hash."""
+    path_obj = Path(file_path)
+    clean_path = str(path_obj.as_posix())
+    if content:
+        content_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()[:8]
+        return f"{path_obj.stem}_{content_hash}"
+    path_hash = hashlib.sha256(clean_path.encode("utf-8")).hexdigest()[:8]
+    return f"{path_obj.stem}_{path_hash}"
+
+
+def load_text_document(file_path: Union[str, Path]) -> Document:
+    """Load a plain text document with multi-encoding fallback support.
+
+    Args:
+        file_path: Path to the plain text file.
+
+    Returns:
+        Document instance containing content and file metadata.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the path is not a file or cannot be decoded.
+    """
+    path = Path(file_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    if not path.is_file():
+        raise ValueError(f"Path is not a regular file: {file_path}")
+
+    encodings = ("utf-8", "utf-8-sig", "latin-1", "cp1252")
+    content: Optional[str] = None
+    used_encoding: Optional[str] = None
+
+    for enc in encodings:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                content = f.read()
+                used_encoding = enc
+                break
+        except UnicodeDecodeError:
+            continue
+
+    if content is None:
+        raise ValueError(f"Failed to decode text file with supported encodings: {file_path}")
+
+    file_stat = path.stat()
+    doc_id = generate_doc_id(path, content)
+
+    metadata: Dict[str, Any] = {
+        "file_name": path.name,
+        "file_path": str(path.as_posix()),
+        "file_extension": path.suffix.lower(),
+        "file_size_bytes": file_stat.st_size,
+        "encoding": used_encoding,
+        "modified_time": datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+    return Document(
+        doc_id=doc_id,
+        content=content,
+        source=str(path.as_posix()),
+        doc_type="text",
+        metadata=metadata,
+    )
