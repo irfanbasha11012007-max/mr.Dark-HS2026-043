@@ -249,6 +249,26 @@ def get_default_embedding_model(model_type: str = "tfidf", **kwargs) -> BaseEmbe
         return TfidfEmbeddingModel(**kwargs)
 
 
+def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    """Normalize a 2D float32 array along rows to unit L2 norm."""
+    if vectors.ndim != 2:
+        raise ValueError(f"Expected 2D array for vector normalization, got {vectors.ndim}D")
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    # Avoid zero division
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    return (vectors / norms).astype(np.float32)
+
+
+def normalize_vector(vector: np.ndarray) -> np.ndarray:
+    """Normalize a 1D float32 array to unit L2 norm."""
+    if vector.ndim != 1:
+        raise ValueError(f"Expected 1D array for vector normalization, got {vector.ndim}D")
+    norm = np.linalg.norm(vector)
+    if norm < 1e-12:
+        return vector.astype(np.float32)
+    return (vector / norm).astype(np.float32)
+
+
 class VectorStore:
     """In-memory and disk-persistent vector storage for document chunks and embeddings."""
 
@@ -312,6 +332,9 @@ class VectorStore:
                 raise ValueError(
                     f"Embeddings count ({len(new_embeddings)}) must match chunks count ({len(chunk_list)})"
                 )
+
+        if self.normalize_embeddings:
+            new_embeddings = normalize_vectors(new_embeddings)
 
         start_idx = len(self.chunks)
         for i, chunk in enumerate(chunk_list):
