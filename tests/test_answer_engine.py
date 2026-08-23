@@ -164,7 +164,6 @@ class TestAbstentionAndGuardrails:
     """Tests verifying that the engine NEVER guesses and abstains on outside knowledge."""
 
     def test_world_knowledge_query_abstains_strictly(self) -> None:
-        # Create retriever with unrelated technical docs
         chunk = DocumentChunk("c1", "d1", "Fast vector index search using cosine metric", 0, 48, 0, "db.md")
         hit = RetrievalHit(chunk, 0.05, confidence_score=0.05)
         ret_result = RetrievalResult(
@@ -204,3 +203,44 @@ class TestAbstentionAndGuardrails:
         assert response.abstained
         assert response.answer == STANDARD_ABSTENTION_MESSAGE
         assert "Nolan" not in response.answer
+
+    def test_missing_information_partial_context_abstains(self) -> None:
+        chunk = DocumentChunk(
+            "c1",
+            "d1",
+            "Phase 1 handles Ingestion. Phase 2 handles Retrieval.",
+            0,
+            52,
+            0,
+            "plan.md",
+        )
+        hit = RetrievalHit(chunk, 0.6, confidence_score=0.6)
+        ret_result = RetrievalResult(
+            query="What are the detailed deployment steps for Kubernetes Phase 5 cluster?",
+            hits=[hit],
+            is_confident=True,
+            top_confidence=0.6,
+        )
+
+        engine = AnswerEngine(min_confidence_threshold=0.20, offline_mode=True)
+        response = engine.generate_answer(
+            "What are the detailed deployment steps for Kubernetes Phase 5 cluster?",
+            retrieval_result=ret_result,
+        )
+
+        assert response.abstained
+        assert response.answer == STANDARD_ABSTENTION_MESSAGE
+
+    def test_normalize_abstention_phrasing_variations(self) -> None:
+        variations = [
+            "I do not have that information in the provided context.",
+            "This information is not available in the given material.",
+            "I cannot answer this question from the provided documents.",
+            "Insufficient context to answer.",
+            "",
+            "   ",
+        ]
+        for v in variations:
+            norm_text, is_abstained = normalize_abstention_response(v)
+            assert is_abstained is True
+            assert norm_text == STANDARD_ABSTENTION_MESSAGE
