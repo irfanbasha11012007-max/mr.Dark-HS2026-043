@@ -119,7 +119,6 @@ class RetrievalResult:
 def tokenize_query(query: str) -> List[str]:
     """Tokenize and filter search terms into alphanumeric tokens."""
     tokens = re.findall(r"\b\w+\b", query.lower())
-    # Filter common trivial stop words while preserving domain keywords
     stop_words = {"a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "it"}
     filtered = [t for t in tokens if t not in stop_words and len(t) > 1]
     return filtered or tokens
@@ -190,16 +189,35 @@ class HybridRetriever:
         lower_text = chunk_text.lower()
         chunk_words = set(re.findall(r"\b\w+\b", lower_text))
 
-        # 1. Token coverage ratio
         matched_tokens = sum(1 for t in query_tokens if t in chunk_words)
         coverage_score = matched_tokens / len(query_tokens)
 
-        # 2. Exact phrase bonus
         clean_raw = raw_query.lower().strip()
         phrase_bonus = 0.2 if len(clean_raw) > 3 and clean_raw in lower_text else 0.0
 
         score = min(1.0, coverage_score * 0.8 + phrase_bonus)
         return float(score)
+
+    def compute_prefix_score(self, query_tokens: Sequence[str], chunk_text: str) -> float:
+        """Compute prefix and stem overlap matching for morphological variations."""
+        if not query_tokens:
+            return 0.0
+
+        lower_text = chunk_text.lower()
+        chunk_words = re.findall(r"\b\w+\b", lower_text)
+        if not chunk_words:
+            return 0.0
+
+        prefix_matches = 0
+        for token in query_tokens:
+            stem = token[:min(4, len(token))]
+            if len(stem) >= 3:
+                for word in chunk_words:
+                    if word.startswith(stem) or (len(word) >= 4 and stem in word):
+                        prefix_matches += 1
+                        break
+
+        return float(min(1.0, prefix_matches / len(query_tokens)))
 
     def retrieve(
         self,
@@ -233,21 +251,26 @@ class HybridRetriever:
         scored_candidates: List[RetrievalHit] = []
         for chunk, dense_score in dense_results:
             kw_score = self.compute_keyword_score(query_tokens, chunk.text, clean_q)
-            # Combine dense and keyword
-            combined_score = self.dense_weight * dense_score + self.keyword_weight * kw_score
+            prefix_score = self.compute_prefix_score(query_tokens, chunk.text)
+
+            # Fuse dense, keyword, and prefix scores
+            combined_score = (
+                self.dense_weight * dense_score
+                + self.keyword_weight * kw_score
+                + self.prefix_weight * prefix_score
+            )
             hit = RetrievalHit(
                 chunk=chunk,
                 dense_score=dense_score,
                 keyword_score=kw_score,
+                prefix_score=prefix_score,
                 hybrid_score=combined_score,
                 confidence_score=combined_score,
             )
             scored_candidates.append(hit)
 
-        # Sort descending by hybrid_score
         scored_candidates.sort(key=lambda h: h.hybrid_score, reverse=True)
 
-        # Assign final rank
         top_hits = scored_candidates[:k]
         for rank_idx, hit in enumerate(top_hits, start=1):
             hit.rank = rank_idx
