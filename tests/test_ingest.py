@@ -11,7 +11,12 @@ from src.config import IngestionConfig
 from src.ingest import (
     Document,
     DocumentChunk,
+    RecursiveCharacterChunker,
+    chunk_document,
     clean_text,
+    compute_character_offsets,
+    extract_section_spans,
+    find_active_section,
     generate_doc_id,
     load_directory,
     load_document,
@@ -197,3 +202,103 @@ class TestPdfDocumentLoader:
         types = {d.doc_type for d in docs}
         assert "text" in types
         assert "markdown" in types
+
+
+class TestTextCleaning:
+    """Test suite for text cleaning and normalization."""
+
+    def test_clean_text_normalizes_whitespace(self):
+        raw = "Line 1   \n\n\n\n\nLine 2     with   extra    spaces."
+        cleaned = clean_text(raw)
+        assert cleaned == "Line 1\n\nLine 2 with extra spaces."
+
+    def test_clean_text_removes_zero_width_and_unifies_linebreaks(self):
+        raw = "Hello\r\n\r\n\r\nWorld\u200b with \u00a0space\r\nand\ufeff BOM."
+        cleaned = clean_text(raw)
+        assert "\r" not in cleaned
+        assert "\u200b" not in cleaned
+        assert "\ufeff" not in cleaned
+        assert "Hello\n\nWorld with space and BOM." == cleaned
+
+    def test_clean_empty_text(self):
+        assert clean_text("") == ""
+        assert clean_text(None) == ""
+
+
+class TestRecursiveChunkerAndOffsets:
+    """Test suite for recursive chunking, overlap, header mapping, and offsets."""
+
+    def test_chunker_basic_splitting(self):
+        text = "Short introductory paragraph.\n\n" + "A" * 300 + "\n\n" + "B" * 300
+        chunker = RecursiveCharacterChunker(chunk_size=200, chunk_overlap=0, min_chunk_length=10)
+        chunks = chunker.split_text(text)
+        assert len(chunks) >= 3
+        for c in chunks:
+            assert len(c) <= 250
+
+    def test_chunker_with_overlap(self):
+        text = "Sentence one is clear. Sentence two is descriptive. Sentence three has details. Sentence four concludes."
+        chunker = RecursiveCharacterChunker(chunk_size=60, chunk_overlap=25, min_chunk_length=10)
+        chunks = chunker.split_text(text)
+        assert len(chunks) > 1
+
+    def test_extract_sections_and_active_header(self):
+        doc_text = "# Overview\nSystem overview details.\n\n## Component A\nDetails about component A.\n\n### Sub-feature A1\nDeep details."
+        spans = extract_section_spans(doc_text)
+        assert len(spans) == 3
+        assert spans[0]["title"] == "Overview"
+        assert spans[1]["title"] == "Component A"
+        assert spans[2]["title"] == "Sub-feature A1"
+
+        # Check active section at offset inside Sub-feature A1
+        sub_offset = doc_text.find("Deep details")
+        header, hierarchy = find_active_section(sub_offset, spans)
+        assert header == "Sub-feature A1"
+        assert hierarchy == ["Overview", "Component A", "Sub-feature A1"]
+
+    def test_chunk_document_end_to_end(self):
+        content = "# Knowledge Assistant\n\n## Ingestion Module\nThe ingestion pipeline is responsible for parsing TXT, Markdown, and PDF documents.\n\n## Evaluation Module\nThe evaluation module benchmarks retrieval and response accuracy."
+        doc = Document(
+            doc_id="test_doc_01",
+            content=content,
+            source="docs/test.md",
+            doc_type="markdown",
+            metadata={"file_name": "test.md"},
+        )
+        config = IngestionConfig(chunk_size=100, chunk_overlap=20, min_chunk_length=15)
+        chunks = chunk_document(doc, config)
+
+        assert len(chunks) > 0
+        for i, chunk in enumerate(chunks):
+            assert chunk.chunk_id == f"test_doc_01#chunk_{i:04d}"
+            assert chunk.doc_id == "test_doc_01"
+            assert chunk.start_char >= 0
+            assert chunk.end_char >= chunk.start_char
+            assert chunk.metadata["doc_type"] == "markdown"
+            assert chunk.metadata["file_name"] == "test.md"
+            assert chunk.metadata["chunk_index"] == i
+            assert chunk.metadata["total_chunks"] == len(chunks)
+
+    def test_document_chunk_serialization_roundtrip(self):
+        chunk = DocumentChunk(
+            chunk_id="doc1#chunk_0000",
+            doc_id="doc1",
+            text="Testing serialization roundtrip.",
+            start_char=0,
+            end_char=32,
+            chunk_index=0,
+            source="doc1.txt",
+            section_header="Intro",
+            metadata={"author": "Harivarman", "priority": 1},
+        )
+        data = chunk.to_dict()
+        restored = DocumentChunk.from_dict(data)
+
+        assert restored.chunk_id == chunk.chunk_id
+        assert restored.doc_id == chunk.doc_id
+        assert restored.text == chunk.text
+        assert restored.start_char == chunk.start_char
+        assert restored.end_char == chunk.end_char
+        assert restored.chunk_index == chunk.chunk_index
+        assert restored.section_header == chunk.section_header
+        assert restored.metadata == chunk.metadata
