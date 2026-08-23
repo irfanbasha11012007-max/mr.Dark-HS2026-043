@@ -254,7 +254,6 @@ def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
     if vectors.ndim != 2:
         raise ValueError(f"Expected 2D array for vector normalization, got {vectors.ndim}D")
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    # Avoid zero division
     norms = np.where(norms < 1e-12, 1.0, norms)
     return (vectors / norms).astype(np.float32)
 
@@ -313,12 +312,7 @@ class VectorStore:
         chunks: Sequence[DocumentChunk],
         embeddings: Optional[np.ndarray] = None,
     ) -> None:
-        """Add chunks and index their embeddings into the store.
-
-        Args:
-            chunks: Sequence of DocumentChunk objects.
-            embeddings: Optional pre-computed 2D float32 numpy array.
-        """
+        """Add chunks and index their embeddings into the store."""
         if not chunks:
             return
 
@@ -352,3 +346,52 @@ class VectorStore:
             self.total_chunks,
             self.dimension,
         )
+
+    def similarity_search(
+        self,
+        query: Union[str, np.ndarray],
+        top_k: int = 5,
+        min_score: float = 0.0,
+    ) -> List[Tuple[DocumentChunk, float]]:
+        """Perform cosine similarity search against stored document vectors.
+
+        Args:
+            query: Query string or pre-computed 1D vector.
+            top_k: Number of top results to return.
+            min_score: Minimum similarity score threshold.
+
+        Returns:
+            List of (DocumentChunk, similarity_score) tuples, ordered descending by score.
+        """
+        if self.embeddings is None or len(self.chunks) == 0:
+            return []
+
+        if isinstance(query, str):
+            query_vec = self.embedding_model.embed_query(query)
+        else:
+            query_vec = np.asarray(query, dtype=np.float32)
+
+        if self.normalize_embeddings:
+            query_vec = normalize_vector(query_vec)
+
+        # Dot product with pre-normalized vectors gives exact cosine similarity
+        scores = np.dot(self.embeddings, query_vec)
+
+        # Filter out NaN or invalid values
+        scores = np.nan_to_num(scores, nan=0.0)
+
+        # Rank indices
+        k = min(top_k, len(scores))
+        if k <= 0:
+            return []
+
+        # Sort indices descending
+        sorted_indices = np.argsort(scores)[::-1][:k]
+
+        results: List[Tuple[DocumentChunk, float]] = []
+        for idx in sorted_indices:
+            score = float(scores[idx])
+            if score >= min_score:
+                results.append((self.chunks[idx], score))
+
+        return results
