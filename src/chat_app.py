@@ -240,19 +240,41 @@ def render_streamlit_assistant_msg(content: str, response_data: dict | None) -> 
     """Helper to render assistant text and details like citations in Streamlit."""
     st.markdown(content)
 
-    if response_data and response_data.get("citations"):
-        citations = response_data["citations"]
-        with st.expander("📚 Grounding Sources & Citations", expanded=False):
-            # Create a structured list showing provenance
-            for idx, cit in enumerate(citations, 1):
-                src_name = Path(cit["source"]).name
-                sec = cit.get("section") or "N/A"
-                page = f"Page {cit['page']}" if cit.get("page") is not None else "Page N/A"
-                st.markdown(
-                    f"**[{idx}] `{src_name}`** | Section: *{sec}* | {page} | Confidence: `{cit.get('confidence', 0.0):.3f}`"
-                )
-                if cit.get("snippet"):
-                    st.caption(f'Snippet: "{cit["snippet"]}"')
+    if response_data:
+        # Confidence display with custom color badge
+        conf = response_data.get("retrieval_confidence", 0.0)
+        latency = response_data.get("latency_ms", 0.0)
+        model = response_data.get("model_name", "openai/gpt-4o-mini")
+
+        if conf >= 0.70:
+            badge_color = "green"
+        elif conf >= 0.30:
+            badge_color = "orange"
+        else:
+            badge_color = "red"
+
+        # Metadata Row
+        st.markdown(
+            f"<div style='font-size: 0.8rem; opacity: 0.7; margin-top: 8px;'>"
+            f"Model: <code>{model}</code> | "
+            f"Confidence: <span style='color: {badge_color}; font-weight: bold;'>{conf:.3f}</span> | "
+            f"Latency: <code>{latency:.1f} ms</code>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        if response_data.get("citations"):
+            citations = response_data["citations"]
+            with st.expander("📚 Grounding Sources & Citations", expanded=False):
+                for idx, cit in enumerate(citations, 1):
+                    src_name = Path(cit["source"]).name
+                    sec = cit.get("section") or "N/A"
+                    page = f"Page {cit['page']}" if cit.get("page") is not None else "Page N/A"
+                    st.markdown(
+                        f"**[{idx}] `{src_name}`** | Section: *{sec}* | {page} | Confidence: `{cit.get('confidence', 0.0):.3f}`"
+                    )
+                    if cit.get("snippet"):
+                        st.caption(f'Snippet: "{cit["snippet"]}"')
 
 
 def run_streamlit_app(args: argparse.Namespace) -> None:
