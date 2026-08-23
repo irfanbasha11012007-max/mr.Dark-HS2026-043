@@ -357,7 +357,7 @@ class VectorStore:
         top_k: int = 5,
         min_score: float = 0.0,
     ) -> List[Tuple[DocumentChunk, float]]:
-        """Perform cosine similarity search against stored document vectors."""
+        """Perform accelerated cosine similarity search against stored document vectors."""
         if self.embeddings is None or len(self.chunks) == 0:
             return []
 
@@ -369,14 +369,21 @@ class VectorStore:
         if self.normalize_embeddings:
             query_vec = normalize_vector(query_vec)
 
+        # Vectorized BLAS matrix-vector dot product
         scores = np.dot(self.embeddings, query_vec)
         scores = np.nan_to_num(scores, nan=0.0)
 
-        k = min(top_k, len(scores))
+        n = len(scores)
+        k = min(top_k, n)
         if k <= 0:
             return []
 
-        sorted_indices = np.argsort(scores)[::-1][:k]
+        # Optimization: use argpartition for O(N) top-k selection when N is large
+        if n > 100 and k < n:
+            top_k_partition = np.argpartition(scores, -k)[-k:]
+            sorted_indices = top_k_partition[np.argsort(scores[top_k_partition])[::-1]]
+        else:
+            sorted_indices = np.argsort(scores)[::-1][:k]
 
         results: List[Tuple[DocumentChunk, float]] = []
         for idx in sorted_indices:
@@ -385,6 +392,54 @@ class VectorStore:
                 results.append((self.chunks[idx], score))
 
         return results
+
+    def batch_similarity_search(
+        self,
+        queries: Sequence[Union[str, np.ndarray]],
+        top_k: int = 5,
+        min_score: float = 0.0,
+    ) -> List[List[Tuple[DocumentChunk, float]]]:
+        """Perform vectorized batch similarity search across multiple queries simultaneously."""
+        if self.embeddings is None or len(self.chunks) == 0 or not queries:
+            return [[] for _ in queries]
+
+        query_vectors: List[np.ndarray] = []
+        for q in queries:
+            if isinstance(q, str):
+                vec = self.embedding_model.embed_query(q)
+            else:
+                vec = np.asarray(q, dtype=np.float32)
+            if self.normalize_embeddings:
+                vec = normalize_vector(vec)
+            query_vectors.append(vec)
+
+        # Shape (num_queries, dimension)
+        q_matrix = np.vstack(query_vectors)
+
+        # Shape (num_queries, num_documents) = q_matrix @ embeddings.T
+        all_scores = np.dot(q_matrix, self.embeddings.T)
+        all_scores = np.nan_to_num(all_scores, nan=0.0)
+
+        batch_results: List[List[Tuple[DocumentChunk, float]]] = []
+        n = self.total_chunks
+        k = min(top_k, n)
+
+        for row_idx in range(len(queries)):
+            scores = all_scores[row_idx]
+            if n > 100 and k < n:
+                top_partition = np.argpartition(scores, -k)[-k:]
+                sorted_idx = top_partition[np.argsort(scores[top_partition])[::-1]]
+            else:
+                sorted_idx = np.argsort(scores)[::-1][:k]
+
+            res: List[Tuple[DocumentChunk, float]] = []
+            for idx in sorted_idx:
+                s = float(scores[idx])
+                if s >= min_score:
+                    res.append((self.chunks[idx], s))
+            batch_results.append(res)
+
+        return batch_results
 
     def save(self, directory: Union[str, Path]) -> None:
         """Persist vector store index, chunks, and embeddings to disk."""
@@ -502,7 +557,6 @@ def build_vector_store_from_jsonl(
     if not chunks:
         logger.warning("No chunks found in %s", jsonl_path)
 
-    # Initialize embedding model
     kwargs: Dict[str, Any] = {}
     if dimension:
         if model_type == "tfidf":
@@ -512,7 +566,6 @@ def build_vector_store_from_jsonl(
 
     embedding_model = get_default_embedding_model(model_type, **kwargs)
 
-    # Fit TF-IDF model if necessary
     if isinstance(embedding_model, TfidfEmbeddingModel) and chunks:
         texts = [c.text for c in chunks]
         embedding_model.fit(texts)
