@@ -208,21 +208,33 @@ def setup_streamlit_styling() -> None:
 
         /* Premium Alert/Card panels */
         .grounded-card {
-            background-color: rgba(34, 197, 94, 0.1);
+            background-color: rgba(34, 197, 94, 0.08);
             border-left: 5px solid #22c55e;
-            padding: 15px;
+            padding: 16px;
             border-radius: 8px;
             margin: 10px 0;
-            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
         }
 
         .abstention-card {
-            background-color: rgba(239, 68, 68, 0.1);
+            background-color: rgba(239, 68, 68, 0.08);
             border-left: 5px solid #ef4444;
-            padding: 15px;
+            padding: 16px;
             border-radius: 8px;
             margin: 10px 0;
-            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+        }
+        
+        .header-grounded {
+            color: #22c55e;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .header-abstention {
+            color: #ef4444;
+            font-weight: bold;
+            margin-bottom: 8px;
         }
 
         /* Sidebar styling */
@@ -238,7 +250,28 @@ def setup_streamlit_styling() -> None:
 
 def render_streamlit_assistant_msg(content: str, response_data: dict | None) -> None:
     """Helper to render assistant text and details like citations in Streamlit."""
-    st.markdown(content)
+    is_abstained = response_data.get("abstained", False) if response_data else False
+
+    if is_abstained:
+        st.markdown(
+            f"""
+            <div class="abstention-card">
+                <div class="header-abstention">⚠️ ABSTENTION / INFORMATION NOT FOUND</div>
+                {content}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="grounded-card">
+                <div class="header-grounded">✅ GROUNDED ANSWER</div>
+                {content}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if response_data:
         # Confidence display with custom color badge
