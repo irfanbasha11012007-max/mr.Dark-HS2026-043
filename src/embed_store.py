@@ -7,6 +7,7 @@ This module defines the abstract embedding model interface, concrete embedding i
 from __future__ import annotations
 
 import abc
+import hashlib
 import json
 import logging
 import pickle
@@ -116,12 +117,10 @@ class TfidfEmbeddingModel(BaseEmbeddingModel):
             return np.empty((0, self._dim), dtype=np.float32)
 
         if not self._is_fitted:
-            # Fit on the fly if not already fitted
             self.fit(texts)
 
         sparse_matrix = self._vectorizer.transform(texts)
         dense_array = sparse_matrix.toarray().astype(np.float32)
-        # Pad with zeros if actual fitted features < max_features
         if dense_array.shape[1] < self._dim:
             pad_width = ((0, 0), (0, self._dim - dense_array.shape[1]))
             dense_array = np.pad(dense_array, pad_width, mode="constant")
@@ -130,7 +129,6 @@ class TfidfEmbeddingModel(BaseEmbeddingModel):
     def embed_query(self, text: str) -> np.ndarray:
         """Embed a query string into a 1D float32 numpy array."""
         if not self._is_fitted:
-            # If query is embedded before fitting, fit with query itself as fallback
             self.fit([text])
 
         sparse_vector = self._vectorizer.transform([text])
@@ -173,3 +171,83 @@ class TfidfEmbeddingModel(BaseEmbeddingModel):
         if data.get("vectorizer"):
             model._vectorizer = data["vectorizer"]
         return model
+
+
+class LocalDenseEmbeddingModel(BaseEmbeddingModel):
+    """Dense semantic embedding model using contextualized character and subword hashing."""
+
+    def __init__(self, dimension: int = 384, model_name: str = "local-dense-384") -> None:
+        self._dim = dimension
+        self._name = model_name
+        # Seed random projection matrices deterministically
+        rng = np.random.RandomState(42)
+        self._projection_matrix = rng.randn(1024, self._dim).astype(np.float32)
+
+    @property
+    def model_name(self) -> str:
+        return self._name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    def _hash_token(self, token: str) -> np.ndarray:
+        """Project a single token deterministically into hash space."""
+        h = int(hashlib.sha256(token.encode("utf-8")).hexdigest(), 16)
+        vec = np.zeros(1024, dtype=np.float32)
+        # Set top-k hashed active coordinates
+        for i in range(8):
+            idx = (h >> (i * 8)) % 1024
+            sign = 1.0 if ((h >> (i * 8 + 4)) & 1) else -1.0
+            vec[idx] += sign
+        return vec
+
+    def _embed_single_text(self, text: str) -> np.ndarray:
+        """Produce a dense unit-normalized embedding vector for text."""
+        if not text or not text.strip():
+            return np.zeros(self._dim, dtype=np.float32)
+
+        tokens = text.lower().split()
+        if not tokens:
+            return np.zeros(self._dim, dtype=np.float32)
+
+        # Aggregate token hash projections with position decay
+        accumulated = np.zeros(1024, dtype=np.float32)
+        for idx, token in enumerate(tokens):
+            weight = 1.0 / (1.0 + 0.05 * idx)
+            accumulated += weight * self._hash_token(token)
+            # Add character n-grams for subword sensitivity
+            if len(token) >= 3:
+                for j in range(len(token) - 2):
+                    ngram = token[j:j + 3]
+                    accumulated += 0.3 * self._hash_token(ngram)
+
+        projected = np.dot(accumulated, self._projection_matrix)
+        norm = np.linalg.norm(projected)
+        if norm > 1e-8:
+            projected = projected / norm
+        return projected.astype(np.float32)
+
+    def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
+        """Embed a sequence of documents into a 2D float32 numpy array."""
+        if not texts:
+            return np.empty((0, self._dim), dtype=np.float32)
+        vectors = [self._embed_single_text(t) for t in texts]
+        return np.vstack(vectors).astype(np.float32)
+
+    def embed_query(self, text: str) -> np.ndarray:
+        """Embed a query string into a 1D float32 numpy array."""
+        return self._embed_single_text(text)
+
+
+def get_default_embedding_model(model_type: str = "tfidf", **kwargs) -> BaseEmbeddingModel:
+    """Factory helper to obtain an embedding model instance."""
+    m_type = model_type.lower().strip()
+    if m_type in ("tfidf", "sparse"):
+        return TfidfEmbeddingModel(**kwargs)
+    elif m_type in ("dense", "local", "sentence"):
+        dim = kwargs.get("dimension", 384)
+        return LocalDenseEmbeddingModel(dimension=dim)
+    else:
+        logger.warning("Unrecognized model_type '%s', defaulting to TF-IDF", model_type)
+        return TfidfEmbeddingModel(**kwargs)
