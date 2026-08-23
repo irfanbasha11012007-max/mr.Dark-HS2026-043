@@ -290,11 +290,7 @@ def verify_context_sufficiency(
 
 
 def normalize_abstention_response(raw_text: str) -> Tuple[str, bool]:
-    """Check if the generated text is an abstention and normalize to the exact standard string.
-
-    Returns:
-        (final_text, is_abstained)
-    """
+    """Check if the generated text is an abstention and normalize to the exact standard string."""
     cleaned = raw_text.strip()
     if not cleaned:
         return STANDARD_ABSTENTION_MESSAGE, True
@@ -305,6 +301,69 @@ def normalize_abstention_response(raw_text: str) -> Tuple[str, bool]:
             return STANDARD_ABSTENTION_MESSAGE, True
 
     return cleaned, False
+
+
+def generate_offline_grounded_answer(
+    question: str,
+    hits: Sequence[RetrievalHit],
+) -> Tuple[str, List[Citation]]:
+    """Deterministically synthesize a grounded extractive answer with citations when offline."""
+    if not hits:
+        return STANDARD_ABSTENTION_MESSAGE, []
+
+    q_tokens = tokenize_query(question)
+    matching_sentences: List[Tuple[str, Citation]] = []
+
+    for idx, hit in enumerate(hits, start=1):
+        chunk = hit.chunk
+        sentences = re.split(r"(?<=[.!?])\s+", chunk.text.strip())
+        for sent in sentences:
+            sent_lower = sent.lower()
+            overlap = sum(1 for t in q_tokens if t in sent_lower)
+            if overlap > 0:
+                citation = Citation(
+                    source=chunk.source,
+                    section=chunk.section_header,
+                    page=chunk.metadata.get("page_number"),
+                    snippet=sent.strip(),
+                    confidence=hit.confidence_score,
+                    doc_id=chunk.doc_id,
+                    chunk_id=chunk.chunk_id,
+                )
+                tag = citation.format_citation_tag(idx)
+                matching_sentences.append((f"{sent.strip()} {tag}", citation))
+
+    if not matching_sentences:
+        # Fallback to top chunk first sentence if no token exact match
+        top_hit = hits[0]
+        top_chunk = top_hit.chunk
+        first_sent = top_chunk.text.split("\n")[0].strip()
+        citation = Citation(
+            source=top_chunk.source,
+            section=top_chunk.section_header,
+            page=top_chunk.metadata.get("page_number"),
+            snippet=first_sent,
+            confidence=top_hit.confidence_score,
+            doc_id=top_chunk.doc_id,
+            chunk_id=top_chunk.chunk_id,
+        )
+        return f"{first_sent} {citation.format_citation_tag(1)}", [citation]
+
+    # Select top matching unique sentences up to 3
+    selected_texts: List[str] = []
+    selected_citations: List[Citation] = []
+    seen = set()
+
+    for text_tag, cit in matching_sentences:
+        if cit.snippet not in seen:
+            seen.add(cit.snippet)
+            selected_texts.append(text_tag)
+            selected_citations.append(cit)
+        if len(selected_texts) >= 3:
+            break
+
+    answer_text = " ".join(selected_texts)
+    return answer_text, selected_citations
 
 
 def build_user_prompt(question: str, context_block: str) -> str:
@@ -328,17 +387,20 @@ class AnswerEngine:
         model_name: str = "openai/gpt-4o-mini",
         generation_config: Optional[GenerationConfig] = None,
         min_confidence_threshold: float = 0.20,
+        offline_mode: bool = False,
     ) -> None:
         self.retriever = retriever
         self.generation_config = generation_config or GenerationConfig()
         self.llm_client = llm_client or LLMClient(default_model=model_name, config=self.generation_config)
         self.model_name = model_name
         self.min_confidence_threshold = min_confidence_threshold
+        self.offline_mode = offline_mode
         logger.info(
-            "Initialized AnswerEngine (model=%s, temp=%.2f, max_tokens=%d)",
+            "Initialized AnswerEngine (model=%s, temp=%.2f, max_tokens=%d, offline=%s)",
             model_name,
             self.generation_config.temperature,
             self.generation_config.max_tokens,
+            self.offline_mode,
         )
 
     def generate_answer(
@@ -381,7 +443,8 @@ class AnswerEngine:
             )
 
         # 2. Evaluate context sufficiency
-        is_sufficient, suff_reason = verify_context_sufficiency(clean_q, r_result.hits if r_result else [])
+        hits = r_result.hits if r_result else []
+        is_sufficient, suff_reason = verify_context_sufficiency(clean_q, hits)
         if not is_sufficient:
             return AnswerResponse(
                 question=clean_q,
@@ -393,11 +456,28 @@ class AnswerEngine:
                 model_name=self.model_name,
             )
 
+        # 3. Generate answer: Offline fallback vs Live LLM
+        if self.offline_mode or not self.llm_client.is_available:
+            answer_text, citations = generate_offline_grounded_answer(clean_q, hits)
+            norm_answer, is_abstained = normalize_abstention_response(answer_text)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            return AnswerResponse(
+                question=clean_q,
+                answer=norm_answer,
+                citations=citations if not is_abstained else [],
+                abstained=is_abstained,
+                abstention_reason=None if not is_abstained else "Normalized offline refusal",
+                retrieval_confidence=top_conf,
+                latency_ms=elapsed_ms,
+                model_name="offline-synthesizer",
+                metadata={"mode": "offline"},
+            )
+
         return AnswerResponse(
             question=clean_q,
             answer=STANDARD_ABSTENTION_MESSAGE,
             abstained=True,
-            abstention_reason="Pending generation step",
+            abstention_reason="Pending live completion integration",
             retrieval_confidence=top_conf,
             latency_ms=(time.perf_counter() - start_time) * 1000,
             model_name=self.model_name,
