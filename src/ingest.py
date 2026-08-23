@@ -127,48 +127,30 @@ def clean_text(
     fix_linebreaks: bool = True,
     remove_control_chars: bool = True,
 ) -> str:
-    """Clean and normalize raw document text.
-
-    Args:
-        text: Input raw string.
-        clean_whitespace: Collapse extra spaces and limit consecutive newlines.
-        normalize_unicode: Apply Unicode NFKC normalization and replace non-breaking spaces.
-        fix_linebreaks: Convert \\r\\n and \\r to \\n.
-        remove_control_chars: Strip non-printable and zero-width characters.
-
-    Returns:
-        Cleaned text string.
-    """
+    """Clean and normalize raw document text."""
     if not text:
         return ""
 
     cleaned = text
 
-    # Standardize line breaks
     if fix_linebreaks:
         cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Normalize Unicode representations (NFKC) and common problematic characters
     if normalize_unicode:
         cleaned = unicodedata.normalize("NFKC", cleaned)
         cleaned = cleaned.replace("\u00a0", " ").replace("\u200b", "").replace("\ufeff", "")
         cleaned = cleaned.replace("\u200c", "").replace("\u200d", "")
 
-    # Remove non-standard control characters (except newline, tab)
     if remove_control_chars:
         cleaned = "".join(
             ch for ch in cleaned
             if ch in ("\n", "\t") or (unicodedata.category(ch) != "Cc" and unicodedata.category(ch) != "Cf")
         )
 
-    # Whitespace cleanup
     if clean_whitespace:
-        # Strip trailing space on each line
         lines = [re.sub(r"[ \t]+$", "", line) for line in cleaned.split("\n")]
         cleaned = "\n".join(lines)
-        # Collapse 3 or more consecutive newlines into 2
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-        # Collapse multiple horizontal whitespace within lines (excluding indentations on clean lines)
         cleaned = re.sub(r"[^\S\n]+", " ", cleaned)
 
     return cleaned.strip()
@@ -407,3 +389,122 @@ def load_directory(
                 logger.error("Failed to load document '%s': %s", item, e)
 
     return docs
+
+
+class RecursiveCharacterChunker:
+    """Splits text recursively based on a prioritized hierarchy of natural boundary separators."""
+
+    def __init__(
+        self,
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        min_chunk_length: int = 20,
+        separators: Optional[Sequence[str]] = None,
+    ) -> None:
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if chunk_overlap < 0:
+            raise ValueError(f"chunk_overlap cannot be negative, got {chunk_overlap}")
+        if chunk_overlap >= chunk_size:
+            raise ValueError(f"chunk_overlap ({chunk_overlap}) must be < chunk_size ({chunk_size})")
+
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.min_chunk_length = min_chunk_length
+        self.separators = tuple(separators or (
+            "\n\n# ",
+            "\n\n## ",
+            "\n\n### ",
+            "\n\n",
+            "\n",
+            ". ",
+            "? ",
+            "! ",
+            " ",
+            "",
+        ))
+
+    def _split_text_recursive(self, text: str, separators: Sequence[str]) -> List[str]:
+        """Recursively split text by separators until pieces fit within chunk_size."""
+        final_chunks: List[str] = []
+        if not text:
+            return final_chunks
+
+        # Find first separator that exists in text
+        chosen_separator = ""
+        new_separators: Sequence[str] = ()
+
+        for i, sep in enumerate(separators):
+            if sep == "":
+                chosen_separator = ""
+                new_separators = ()
+                break
+            if sep in text:
+                chosen_separator = sep
+                new_separators = separators[i + 1:]
+                break
+
+        # Split with chosen separator
+        if chosen_separator:
+            splits = text.split(chosen_separator)
+        else:
+            # Character by character fallback
+            splits = list(text)
+
+        good_splits: List[str] = []
+        for s in splits:
+            if chosen_separator and chosen_separator.strip():
+                # Re-attach separator context if meaningful
+                segment = s if not good_splits else (chosen_separator + s if not s.startswith(chosen_separator) else s)
+            else:
+                segment = s
+
+            if len(segment) <= self.chunk_size:
+                good_splits.append(segment)
+            else:
+                if new_separators:
+                    other_splits = self._split_text_recursive(segment, new_separators)
+                    good_splits.extend(other_splits)
+                else:
+                    # Hard character slicing fallback if no separators remain
+                    for j in range(0, len(segment), self.chunk_size):
+                        good_splits.append(segment[j:j + self.chunk_size])
+
+        return good_splits
+
+    def split_text(self, text: str) -> List[str]:
+        """Split text into chunks without overlap (base recursive split)."""
+        if not text or not text.strip():
+            return []
+
+        if len(text) <= self.chunk_size:
+            return [text.strip()] if len(text.strip()) >= self.min_chunk_length else [text.strip()]
+
+        raw_splits = self._split_text_recursive(text, self.separators)
+
+        # Merge small adjacent pieces up to chunk_size
+        merged_chunks: List[str] = []
+        current_chunk: List[str] = []
+        current_length = 0
+
+        for piece in raw_splits:
+            if not piece:
+                continue
+            piece_len = len(piece)
+            if current_length + piece_len <= self.chunk_size:
+                current_chunk.append(piece)
+                current_length += piece_len
+            else:
+                if current_chunk:
+                    merged = "".join(current_chunk).strip()
+                    if len(merged) >= self.min_chunk_length:
+                        merged_chunks.append(merged)
+                current_chunk = [piece]
+                current_length = piece_len
+
+        if current_chunk:
+            merged = "".join(current_chunk).strip()
+            if len(merged) >= self.min_chunk_length or not merged_chunks:
+                merged_chunks.append(merged)
+
+        return merged_chunks
