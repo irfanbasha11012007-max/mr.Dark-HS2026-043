@@ -71,6 +71,49 @@ def load_dataset(dataset_path: Path) -> List[Dict[str, Any]]:
     return records
 
 
+def calculate_factual_accuracy(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Calculate accuracy and entity coverage metrics for in-scope answerable questions."""
+    in_scope_results = [r for r in results if r["is_in_scope"]]
+    if not in_scope_results:
+        return {"accuracy": 0.0, "total_in_scope": 0}
+
+    total_correct = 0
+    total_in_scope = len(in_scope_results)
+    entity_match_percentages = []
+
+    for r in in_scope_results:
+        gen_ans = r["generated_answer"]
+        key_entities = r.get("key_entities", [])
+        
+        # If model abstained on an in-scope question, it's incorrect (false negative/rejection)
+        if r["abstained"]:
+            entity_match_percentages.append(0.0)
+            continue
+
+        if not key_entities:
+            # If no key entities are defined and model didn't abstain, count as correct
+            total_correct += 1
+            entity_match_percentages.append(1.0)
+            continue
+
+        matched = sum(1 for e in key_entities if e.lower() in gen_ans.lower())
+        match_ratio = matched / len(key_entities)
+        entity_match_percentages.append(match_ratio)
+
+        # Factual coverage rule: correct if at least 50% of the key entities are present in generated text
+        if match_ratio >= 0.5:
+            total_correct += 1
+
+    avg_entity_coverage = sum(entity_match_percentages) / len(entity_match_percentages) if entity_match_percentages else 0.0
+
+    return {
+        "accuracy": total_correct / total_in_scope if total_in_scope > 0 else 0.0,
+        "total_in_scope": total_in_scope,
+        "correct_in_scope": total_correct,
+        "average_entity_coverage": avg_entity_coverage,
+    }
+
+
 def run_evaluation(args: argparse.Namespace) -> Dict[str, Any]:
     """Execute evaluation queries and collect raw outputs."""
     dataset_path = Path(args.dataset)
@@ -117,6 +160,8 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, Any]:
             "latency_ms": latency,
         })
 
+    accuracy_metrics = calculate_factual_accuracy(results)
+
     report = {
         "metadata": {
             "eval_time": time.asctime(),
@@ -125,6 +170,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, Any]:
             "offline": args.offline,
             "total_questions": len(records),
         },
+        "accuracy_metrics": accuracy_metrics,
         "results": results,
     }
     return report
@@ -141,6 +187,7 @@ def main() -> None:
         json.dump(report, f, indent=2)
 
     logger.info("Evaluation report saved to %s", output_path)
+    logger.info("Factual Accuracy (Entity Coverage Score): %.2f%%", report["accuracy_metrics"]["accuracy"] * 100)
 
 
 if __name__ == "__main__":
